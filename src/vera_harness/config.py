@@ -50,9 +50,11 @@ class HarnessConfig:
     telegram_request_timeout_seconds: int
     telegram_state_path: Path
     telegram_unauthorized_response: Optional[str]
+    run_state_path: Path
     workspace_root: Path
     codex_app_server_command: CommandSpec
     max_turns: int
+    max_retries: int
     turn_timeout_seconds: int
     run_timeout_seconds: int
     workspace_bootstrap_timeout_seconds: int
@@ -94,6 +96,9 @@ class HarnessConfig:
         telegram_unauthorized_response = _optional_text(
             source.get("VERA_TELEGRAM_UNAUTHORIZED_RESPONSE")
         )
+        run_state_path = Path(
+            source.get("VERA_RUN_STATE_PATH", "./.vera/run_state.json")
+        ).expanduser().resolve()
 
         if require_secrets and not telegram_bot_token:
             raise ConfigError("VERA_TELEGRAM_BOT_TOKEN is required for live runs")
@@ -110,6 +115,11 @@ class HarnessConfig:
             "VERA_CODEX_APP_SERVER_COMMAND",
         )
         max_turns = _parse_positive_int(source.get("VERA_MAX_TURNS"), "VERA_MAX_TURNS", 20)
+        max_retries = _parse_nonnegative_int(
+            source.get("VERA_MAX_RETRIES"),
+            "VERA_MAX_RETRIES",
+            1,
+        )
         turn_timeout_seconds = _parse_positive_int(
             source.get("VERA_TURN_TIMEOUT_SECONDS"),
             "VERA_TURN_TIMEOUT_SECONDS",
@@ -163,9 +173,11 @@ class HarnessConfig:
             telegram_request_timeout_seconds=telegram_request_timeout_seconds,
             telegram_state_path=telegram_state_path,
             telegram_unauthorized_response=telegram_unauthorized_response,
+            run_state_path=run_state_path,
             workspace_root=workspace_root,
             codex_app_server_command=codex_command,
             max_turns=max_turns,
+            max_retries=max_retries,
             turn_timeout_seconds=turn_timeout_seconds,
             run_timeout_seconds=run_timeout_seconds,
             workspace_bootstrap_timeout_seconds=workspace_bootstrap_timeout_seconds,
@@ -231,4 +243,17 @@ def _parse_positive_int(value: Optional[str], field_name: str, default: int) -> 
         raise ConfigError("{} must be an integer".format(field_name))
     if parsed <= 0:
         raise ConfigError("{} must be greater than zero".format(field_name))
+    return parsed
+
+
+def _parse_nonnegative_int(value: Optional[str], field_name: str, default: int) -> int:
+    text = _optional_text(value)
+    if text is None:
+        return default
+    try:
+        parsed = int(text)
+    except ValueError:
+        raise ConfigError("{} must be an integer".format(field_name))
+    if parsed < 0:
+        raise ConfigError("{} must be zero or greater".format(field_name))
     return parsed

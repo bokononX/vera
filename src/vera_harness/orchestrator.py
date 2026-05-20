@@ -1,25 +1,90 @@
-"""Top-level orchestration for the Vera harness scaffold."""
+"""Top-level orchestration for the Vera harness."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Tuple
+import re
+import time
+from dataclasses import dataclass, replace
+from typing import Callable, List, Optional, Protocol, Tuple
 
-from .codex import CodexInvocation, CodexRuntimePlanner
+from .codex import (
+    CodexAppServerRuntime,
+    CodexInvocation,
+    CodexRunResult,
+    CodexRunStatus,
+    CodexRuntimeEvent,
+    CodexRuntimeEventType,
+    CodexRuntimePlanner,
+    CodexSessionMetadata,
+)
 from .config import HarnessConfig
-from .models import HarnessRun, TelegramTask, Workspace
+from .models import (
+    HarnessRun,
+    HarnessRunStatus,
+    OrchestrationDecision,
+    RunState,
+    TaskEvent,
+    TaskEventType,
+    TelegramTask,
+    Workspace,
+    WorkspaceReusePolicy,
+)
 from .prompt import PromptPolicy, build_prompt_policy
+from .state import JsonRunStateStore
 from .telegram import TelegramIntake, TelegramIntakeOutcome, TelegramLongPollingIntake, TelegramUpdateStatus
-from .workspace import WorkspaceManager
+from .workspace import WorkspaceBootstrapError, WorkspaceManager
+
+
+RuntimeEventCallback = Callable[[CodexRuntimeEvent], None]
+TaskEventCallback = Callable[[TaskEvent], None]
+
+
+class CodexRuntime(Protocol):
+    """Runtime boundary used by the orchestrator."""
+
+    def run_turn(
+        self,
+        invocation: CodexInvocation,
+        on_event: Optional[RuntimeEventCallback] = None,
+    ) -> CodexRunResult:
+        """Run one Codex turn."""
+
+
+class RunStateStore(Protocol):
+    """Minimal persistence boundary for orchestration run state."""
+
+    def active_run_for_task(self, task_id: str) -> Optional[RunState]:
+        """Return an active run for a task if one exists."""
+
+    def create_run(self, task: TelegramTask, run_id: str, dry_run: bool) -> RunState:
+        """Create a new run unless an active one already exists."""
+
+    def save_run(self, state: RunState) -> RunState:
+        """Persist a run-state update."""
 
 
 @dataclass(frozen=True)
-class DryRunResult:
+class TurnDecision:
+    action: OrchestrationDecision
+    status: HarnessRunStatus
+    reason: str
+    marker: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TaskRunResult:
     task: TelegramTask
     workspace: Workspace
     harness_run: HarnessRun
-    policy: PromptPolicy
-    invocation: CodexInvocation
+    policy: Optional[PromptPolicy]
+    invocation: Optional[CodexInvocation]
+    events: Tuple[TaskEvent, ...]
+    turn_results: Tuple[CodexRunResult, ...]
+    final_decision: TurnDecision
+    duplicate_of: Optional[RunState] = None
+
+
+DryRunResult = TaskRunResult
 
 
 @dataclass(frozen=True)
@@ -29,13 +94,22 @@ class PollOnceResult:
 
 
 class VeraHarness:
-    """Coordinates intake, workspace planning, policy prompts, and Codex plans."""
+    """Coordinates intake, workspace lifecycle, policy prompts, and Codex turns."""
 
-    def __init__(self, config: HarnessConfig) -> None:
+    def __init__(
+        self,
+        config: HarnessConfig,
+        runtime: Optional[CodexRuntime] = None,
+        run_store: Optional[RunStateStore] = None,
+        on_event: Optional[TaskEventCallback] = None,
+    ) -> None:
         self._config = config
         self._telegram = TelegramIntake(config)
         self._workspaces = WorkspaceManager(config)
-        self._codex = CodexRuntimePlanner(config)
+        self._planner = CodexRuntimePlanner(config)
+        self._runtime = runtime or CodexAppServerRuntime(config)
+        self._run_store = run_store or JsonRunStateStore(config.run_state_path)
+        self._on_event = on_event
 
     def dry_run_task(
         self,
@@ -53,22 +127,275 @@ class VeraHarness:
             text=text,
             username=username,
         )
-        workspace = self._workspaces.workspace_for_task(task, create=create_workspace)
-        policy = build_prompt_policy(task)
+        return self.run_task(
+            task,
+            dry_run=True,
+            create_workspace=create_workspace,
+            run_bootstrap=False,
+            runtime=FakeCodexRuntime(),
+        )
+
+    def run_task(
+        self,
+        task: TelegramTask,
+        dry_run: bool = False,
+        create_workspace: bool = True,
+        workspace_policy: WorkspaceReusePolicy = WorkspaceReusePolicy.REUSE,
+        run_bootstrap: bool = True,
+        runtime: Optional[CodexRuntime] = None,
+    ) -> TaskRunResult:
+        """Run a normalized task through the supervised Codex loop."""
+
+        selected_runtime = runtime or self._runtime
+        events: List[TaskEvent] = []
+        turn_results: List[CodexRunResult] = []
+        run_id = _run_id(task, dry_run=dry_run)
+
+        active = self._run_store.active_run_for_task(task.task_id)
+        workspace = self._workspaces.workspace_for_task(task, create=False)
+        if active is not None:
+            decision = TurnDecision(
+                action=OrchestrationDecision.BLOCK,
+                status=HarnessRunStatus.DUPLICATE_ACTIVE,
+                reason="active run already exists for task",
+            )
+            harness_run = HarnessRun(
+                run_id=active.run_id,
+                task=task,
+                workspace=workspace,
+                max_turns=self._config.max_turns,
+                status=HarnessRunStatus.DUPLICATE_ACTIVE,
+                dry_run=dry_run,
+            )
+            self._emit(
+                events,
+                TaskEventType.DUPLICATE_ACTIVE,
+                task,
+                active.run_id,
+                status=active.status.value,
+                message=decision.reason,
+                payload={"existing_run_id": active.run_id},
+            )
+            return TaskRunResult(
+                task=task,
+                workspace=workspace,
+                harness_run=harness_run,
+                policy=None,
+                invocation=None,
+                events=tuple(events),
+                turn_results=(),
+                final_decision=decision,
+                duplicate_of=active,
+            )
+
+        state = self._run_store.create_run(task, run_id, dry_run=dry_run)
         harness_run = HarnessRun(
-            run_id="dry-run-{}".format(task.task_id),
+            run_id=state.run_id,
             task=task,
             workspace=workspace,
             max_turns=self._config.max_turns,
-            dry_run=True,
+            status=HarnessRunStatus.PLANNED,
+            dry_run=dry_run,
         )
-        invocation = self._codex.plan(workspace, policy.render_prompt())
-        return DryRunResult(
+        self._emit(events, TaskEventType.RUN_STARTED, task, state.run_id, status="planned")
+
+        try:
+            workspace = self._workspaces.prepare_workspace(
+                task,
+                policy=workspace_policy,
+                create=create_workspace,
+                run_bootstrap=run_bootstrap and not dry_run,
+            )
+        except WorkspaceBootstrapError as exc:
+            workspace = exc.workspace
+            decision = TurnDecision(
+                action=OrchestrationDecision.FAIL,
+                status=HarnessRunStatus.FAILED,
+                reason=workspace.bootstrap_error or str(exc),
+            )
+            state = self._run_store.save_run(
+                replace(
+                    state,
+                    status=HarnessRunStatus.FAILED,
+                    workspace_path=str(workspace.path),
+                    last_error=decision.reason,
+                    last_decision=decision.action.value,
+                )
+            )
+            self._emit(
+                events,
+                TaskEventType.RUN_FAILED,
+                task,
+                state.run_id,
+                status=decision.status.value,
+                message=decision.reason,
+            )
+            return _result(
+                task=task,
+                workspace=workspace,
+                harness_run=harness_run,
+                policy=None,
+                invocation=None,
+                events=events,
+                turn_results=turn_results,
+                decision=decision,
+            )
+
+        state = self._run_store.save_run(
+            replace(
+                state,
+                status=HarnessRunStatus.RUNNING,
+                workspace_path=str(workspace.path),
+            )
+        )
+        harness_run = replace(harness_run, workspace=workspace, status=HarnessRunStatus.RUNNING)
+        self._emit(
+            events,
+            TaskEventType.WORKSPACE_PREPARED,
+            task,
+            state.run_id,
+            status=workspace.bootstrap_status.value,
+            payload={
+                "workspace_path": str(workspace.path),
+                "created": workspace.created,
+                "reused": workspace.reused,
+                "reuse_policy": workspace.reuse_policy.value,
+            },
+        )
+
+        policy = build_prompt_policy(task)
+        prompt = policy.render_prompt()
+        invocation = self._planner.plan(workspace, prompt)
+        self._emit(
+            events,
+            TaskEventType.PROMPT_BUILT,
+            task,
+            state.run_id,
+            payload={"policy_lines": len(policy.summary_lines)},
+        )
+
+        retry_count = 0
+        final_decision = TurnDecision(
+            action=OrchestrationDecision.FAIL,
+            status=HarnessRunStatus.FAILED,
+            reason="max turns reached without terminal decision",
+        )
+
+        for turn_number in range(1, self._config.max_turns + 1):
+            self._emit(
+                events,
+                TaskEventType.CODEX_TURN_STARTED,
+                task,
+                state.run_id,
+                turn_number=turn_number,
+            )
+            observed_runtime_events: List[CodexRuntimeEvent] = []
+
+            def on_runtime_event(event: CodexRuntimeEvent) -> None:
+                observed_runtime_events.append(event)
+                self._emit_runtime_event(events, task, state.run_id, turn_number, event)
+
+            run_result = selected_runtime.run_turn(invocation, on_event=on_runtime_event)
+            for runtime_event in run_result.events[len(observed_runtime_events) :]:
+                self._emit_runtime_event(events, task, state.run_id, turn_number, runtime_event)
+
+            turn_results.append(run_result)
+            self._emit(
+                events,
+                TaskEventType.CODEX_TURN_COMPLETED,
+                task,
+                state.run_id,
+                status=run_result.status.value,
+                turn_number=turn_number,
+                message=run_result.error,
+            )
+
+            decision = _decide_after_turn(
+                run_result,
+                turn_number=turn_number,
+                max_turns=self._config.max_turns,
+                retry_count=retry_count,
+                max_retries=self._config.max_retries,
+            )
+            state = self._run_store.save_run(
+                replace(
+                    state,
+                    status=HarnessRunStatus.RUNNING
+                    if decision.action in {OrchestrationDecision.CONTINUE, OrchestrationDecision.RETRY}
+                    else decision.status,
+                    turns_completed=turn_number,
+                    last_error=run_result.error,
+                    last_decision=decision.action.value,
+                )
+            )
+            self._emit(
+                events,
+                TaskEventType.DECISION_RECORDED,
+                task,
+                state.run_id,
+                status=decision.action.value,
+                turn_number=turn_number,
+                message=decision.reason,
+                payload={"marker": decision.marker},
+            )
+
+            if decision.action == OrchestrationDecision.CONTINUE:
+                continue
+            if decision.action == OrchestrationDecision.RETRY:
+                retry_count += 1
+                self._emit(
+                    events,
+                    TaskEventType.RETRY_SCHEDULED,
+                    task,
+                    state.run_id,
+                    status="retry",
+                    turn_number=turn_number,
+                    message=decision.reason,
+                    payload={"retry_count": retry_count, "max_retries": self._config.max_retries},
+                )
+                continue
+
+            final_decision = decision
+            break
+
+        if state.status == HarnessRunStatus.RUNNING:
+            state = self._run_store.save_run(
+                replace(
+                    state,
+                    status=final_decision.status,
+                    last_error=final_decision.reason
+                    if final_decision.status == HarnessRunStatus.FAILED
+                    else state.last_error,
+                    last_decision=final_decision.action.value,
+                )
+            )
+
+        final_event_type = {
+            HarnessRunStatus.COMPLETED: TaskEventType.RUN_COMPLETED,
+            HarnessRunStatus.BLOCKED: TaskEventType.RUN_BLOCKED,
+            HarnessRunStatus.APPROVAL_REQUIRED: TaskEventType.RUN_BLOCKED,
+            HarnessRunStatus.INPUT_REQUIRED: TaskEventType.RUN_BLOCKED,
+        }.get(final_decision.status, TaskEventType.RUN_FAILED)
+        self._emit(
+            events,
+            final_event_type,
+            task,
+            state.run_id,
+            status=final_decision.status.value,
+            message=final_decision.reason,
+        )
+
+        self._apply_workspace_retention(workspace, final_decision.status)
+
+        return _result(
             task=task,
             workspace=workspace,
-            harness_run=harness_run,
+            harness_run=replace(harness_run, status=final_decision.status),
             policy=policy,
             invocation=invocation,
+            events=events,
+            turn_results=turn_results,
+            decision=final_decision,
         )
 
     def poll_telegram_once(self) -> PollOnceResult:
@@ -81,14 +408,128 @@ class VeraHarness:
             queued_tasks=polling_intake.queue.queued_tasks(),
         )
 
+    def _emit(
+        self,
+        events: List[TaskEvent],
+        event_type: TaskEventType,
+        task: TelegramTask,
+        run_id: str,
+        status: Optional[str] = None,
+        message: Optional[str] = None,
+        turn_number: Optional[int] = None,
+        payload: Optional[dict[str, object]] = None,
+    ) -> None:
+        event = TaskEvent(
+            type=event_type,
+            task_id=task.task_id,
+            run_id=run_id,
+            status=status,
+            message=message,
+            turn_number=turn_number,
+            payload=payload or {},
+        )
+        events.append(event)
+        if self._on_event is not None:
+            self._on_event(event)
+
+    def _emit_runtime_event(
+        self,
+        events: List[TaskEvent],
+        task: TelegramTask,
+        run_id: str,
+        turn_number: int,
+        runtime_event: CodexRuntimeEvent,
+    ) -> None:
+        self._emit(
+            events,
+            TaskEventType.CODEX_RUNTIME_EVENT,
+            task,
+            run_id,
+            status=runtime_event.type.value,
+            message=runtime_event.message,
+            turn_number=turn_number,
+            payload={
+                "method": runtime_event.method,
+                "thread_id": runtime_event.thread_id,
+                "turn_id": runtime_event.turn_id,
+            },
+        )
+
+    def _apply_workspace_retention(
+        self,
+        workspace: Workspace,
+        status: HarnessRunStatus,
+    ) -> None:
+        if self._config.workspace_retention_policy == "retain":
+            return
+        if self._config.workspace_retention_policy == "cleanup_on_success":
+            if status != HarnessRunStatus.COMPLETED:
+                return
+        self._workspaces.cleanup_workspace(workspace)
+
+
+class FakeCodexRuntime:
+    """Deterministic runtime used by dry-run mode and unit tests."""
+
+    def __init__(
+        self,
+        statuses: Tuple[CodexRunStatus, ...] = (CodexRunStatus.COMPLETED,),
+        markers: Tuple[str, ...] = ("completed",),
+    ) -> None:
+        self._statuses = statuses
+        self._markers = markers
+        self.calls: List[CodexInvocation] = []
+
+    def run_turn(
+        self,
+        invocation: CodexInvocation,
+        on_event: Optional[RuntimeEventCallback] = None,
+    ) -> CodexRunResult:
+        self.calls.append(invocation)
+        index = len(self.calls) - 1
+        status = self._statuses[min(index, len(self._statuses) - 1)]
+        marker = self._markers[min(index, len(self._markers) - 1)]
+        event = CodexRuntimeEvent(
+            type=CodexRuntimeEventType.NOTIFICATION,
+            method="fake/turn",
+            message="VERA_TASK_STATUS: {}\nVERA_STATUS_REASON: fake runtime dry-run".format(marker),
+        )
+        if on_event is not None:
+            on_event(event)
+        return CodexRunResult(
+            status=status,
+            metadata=CodexSessionMetadata(
+                command=invocation.display_command,
+                cwd=invocation.workspace_path,
+                approval_policy=invocation.approval_policy,
+                sandbox_mode=invocation.sandbox_mode,
+                thread_id="fake-thread",
+                turn_id="fake-turn-{}".format(len(self.calls)),
+                model="fake-codex-runtime",
+                model_provider="vera-harness",
+            ),
+            events=(event,),
+            error=None if status == CodexRunStatus.COMPLETED else status.value,
+            elapsed_seconds=0.0,
+        )
+
 
 def format_dry_run(result: DryRunResult) -> str:
     invocation = result.invocation
-    repo_clone = invocation.repo_clone_command.display if invocation.repo_clone_command else "not configured"
+    repo_clone = invocation.repo_clone_command.display if invocation and invocation.repo_clone_command else "not configured"
     repo_bootstrap = (
-        invocation.repo_bootstrap_command.display if invocation.repo_bootstrap_command else "not configured"
+        invocation.repo_bootstrap_command.display if invocation and invocation.repo_bootstrap_command else "not configured"
     )
-    policy_lines = "\n".join("- {}".format(line) for line in result.policy.summary_lines)
+    policy_lines = "\n".join(
+        "- {}".format(line) for line in (result.policy.summary_lines if result.policy else ())
+    )
+    event_lines = "\n".join(
+        "- {}{}".format(
+            event.type.value,
+            " ({})".format(event.status) if event.status else "",
+        )
+        for event in result.events
+    )
 
     return "\n".join(
         [
@@ -106,17 +547,24 @@ def format_dry_run(result: DryRunResult) -> str:
             policy_lines,
             "",
             "planned_codex_invocation:",
-            "command: {}".format(invocation.display_command),
-            "workspace: {}".format(invocation.workspace_path),
-            "max_turns: {}".format(invocation.max_turns),
-            "turn_timeout_seconds: {}".format(invocation.turn_timeout_seconds),
-            "run_timeout_seconds: {}".format(invocation.run_timeout_seconds),
-            "approval_policy: {}".format(invocation.approval_policy),
-            "sandbox_mode: {}".format(invocation.sandbox_mode),
+            "command: {}".format(invocation.display_command if invocation else "not planned"),
+            "workspace: {}".format(invocation.workspace_path if invocation else "not planned"),
+            "max_turns: {}".format(invocation.max_turns if invocation else "not planned"),
+            "turn_timeout_seconds: {}".format(invocation.turn_timeout_seconds if invocation else "not planned"),
+            "run_timeout_seconds: {}".format(invocation.run_timeout_seconds if invocation else "not planned"),
+            "approval_policy: {}".format(invocation.approval_policy if invocation else "not planned"),
+            "sandbox_mode: {}".format(invocation.sandbox_mode if invocation else "not planned"),
             "repo_clone_command: {}".format(repo_clone),
             "repo_bootstrap_command: {}".format(repo_bootstrap),
             "",
-            "codex_launch: skipped (dry run)",
+            "final_status: {}".format(result.harness_run.status.value),
+            "final_decision: {}".format(result.final_decision.action.value),
+            "turns_completed: {}".format(len(result.turn_results)),
+            "",
+            "event_sequence:",
+            event_lines,
+            "",
+            "codex_launch: skipped (fake runtime dry run)",
             "telegram_network_calls: skipped (dry run)",
         ]
     )
@@ -139,4 +587,134 @@ def format_poll_once(result: PollOnceResult) -> str:
             "queued_tasks: {}".format(len(result.queued_tasks)),
             "codex_launch: skipped (queued only)",
         ]
+    )
+
+
+def _decide_after_turn(
+    result: CodexRunResult,
+    turn_number: int,
+    max_turns: int,
+    retry_count: int,
+    max_retries: int,
+) -> TurnDecision:
+    if result.status == CodexRunStatus.COMPLETED:
+        marker = _extract_status_marker(result)
+        if marker == "blocked":
+            return TurnDecision(
+                action=OrchestrationDecision.BLOCK,
+                status=HarnessRunStatus.BLOCKED,
+                reason="Codex reported a task blocker",
+                marker=marker,
+            )
+        if marker == "failed":
+            return TurnDecision(
+                action=OrchestrationDecision.FAIL,
+                status=HarnessRunStatus.FAILED,
+                reason="Codex reported task failure",
+                marker=marker,
+            )
+        if marker == "continue":
+            if turn_number >= max_turns:
+                return TurnDecision(
+                    action=OrchestrationDecision.FAIL,
+                    status=HarnessRunStatus.FAILED,
+                    reason="max turns reached after continue decision",
+                    marker=marker,
+                )
+            return TurnDecision(
+                action=OrchestrationDecision.CONTINUE,
+                status=HarnessRunStatus.RUNNING,
+                reason="Codex requested another turn",
+                marker=marker,
+            )
+        return TurnDecision(
+            action=OrchestrationDecision.COMPLETE,
+            status=HarnessRunStatus.COMPLETED,
+            reason="Codex completed the task",
+            marker=marker,
+        )
+
+    if result.status == CodexRunStatus.APPROVAL_REQUIRED:
+        return TurnDecision(
+            action=OrchestrationDecision.BLOCK,
+            status=HarnessRunStatus.APPROVAL_REQUIRED,
+            reason=result.error or "Codex requested approval",
+        )
+    if result.status == CodexRunStatus.INPUT_REQUIRED:
+        return TurnDecision(
+            action=OrchestrationDecision.BLOCK,
+            status=HarnessRunStatus.INPUT_REQUIRED,
+            reason=result.error or "Codex requested human input",
+        )
+
+    if result.status in {
+        CodexRunStatus.FAILED,
+        CodexRunStatus.TIMED_OUT,
+        CodexRunStatus.CANCELLED,
+    }:
+        if retry_count < max_retries and turn_number < max_turns:
+            return TurnDecision(
+                action=OrchestrationDecision.RETRY,
+                status=HarnessRunStatus.RUNNING,
+                reason=result.error or "Codex turn failed; retrying",
+            )
+        return TurnDecision(
+            action=OrchestrationDecision.FAIL,
+            status=HarnessRunStatus.FAILED,
+            reason=result.error or "Codex turn failed",
+        )
+
+    return TurnDecision(
+        action=OrchestrationDecision.FAIL,
+        status=HarnessRunStatus.FAILED,
+        reason="unrecognized Codex status: {}".format(result.status.value),
+    )
+
+
+_STATUS_MARKER_RE = re.compile(
+    r"VERA_TASK_STATUS:\s*(completed|continue|blocked|failed)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_status_marker(result: CodexRunResult) -> Optional[str]:
+    haystack = "\n".join(_event_text(event) for event in result.events)
+    match = None
+    for match in _STATUS_MARKER_RE.finditer(haystack):
+        pass
+    if match is None:
+        return None
+    return match.group(1).lower()
+
+
+def _event_text(event: CodexRuntimeEvent) -> str:
+    parts = [event.message or "", str(event.payload)]
+    return "\n".join(parts)
+
+
+def _run_id(task: TelegramTask, dry_run: bool) -> str:
+    if dry_run:
+        return "dry-run-{}".format(task.task_id)
+    return "run-{}-{}".format(task.task_id, int(time.time() * 1000))
+
+
+def _result(
+    task: TelegramTask,
+    workspace: Workspace,
+    harness_run: HarnessRun,
+    policy: Optional[PromptPolicy],
+    invocation: Optional[CodexInvocation],
+    events: List[TaskEvent],
+    turn_results: List[CodexRunResult],
+    decision: TurnDecision,
+) -> TaskRunResult:
+    return TaskRunResult(
+        task=task,
+        workspace=workspace,
+        harness_run=replace(harness_run, workspace=workspace, status=decision.status),
+        policy=policy,
+        invocation=invocation,
+        events=tuple(events),
+        turn_results=tuple(turn_results),
+        final_decision=decision,
     )
