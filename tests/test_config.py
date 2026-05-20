@@ -20,6 +20,8 @@ class HarnessConfigTests(unittest.TestCase):
                     "VERA_RUN_TIMEOUT_SECONDS": "22",
                     "VERA_APPROVAL_POLICY": "never",
                     "VERA_SANDBOX_MODE": "read-only",
+                    "VERA_CODEX_APPROVAL_DECISION": "decline",
+                    "VERA_CODEX_AUTO_INPUT_RESPONSE": "Use the default option.",
                     "VERA_REPO_CLONE_COMMAND": "git clone git@example.test:repo.git .",
                     "VERA_REPO_BOOTSTRAP_COMMAND": "python3 -m unittest",
                 }
@@ -35,6 +37,8 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.run_timeout_seconds, 22)
         self.assertEqual(config.approval_policy, "never")
         self.assertEqual(config.sandbox_mode, "read-only")
+        self.assertEqual(config.codex_approval_decision, "decline")
+        self.assertEqual(config.codex_auto_input_response, "Use the default option.")
         self.assertIsNotNone(config.repo_clone_command)
         self.assertIsNotNone(config.repo_bootstrap_command)
 
@@ -45,6 +49,9 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.allowed_chat_ids, ())
         self.assertEqual(config.allowed_user_ids, ())
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server"))
+        self.assertEqual(config.sandbox_mode, "read-only")
+        self.assertIsNone(config.codex_approval_decision)
+        self.assertIsNone(config.codex_auto_input_response)
 
     def test_live_config_requires_token_and_allow_list(self):
         with self.assertRaises(ConfigError):
@@ -63,6 +70,7 @@ class HarnessConfigTests(unittest.TestCase):
             {"VERA_TURN_TIMEOUT_SECONDS": "-1"},
             {"VERA_APPROVAL_POLICY": "sometimes"},
             {"VERA_SANDBOX_MODE": "open"},
+            {"VERA_CODEX_APPROVAL_DECISION": "approve"},
             {"VERA_CODEX_APP_SERVER_COMMAND": ""},
         ]
 

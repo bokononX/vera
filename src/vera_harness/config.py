@@ -52,6 +52,8 @@ class HarnessConfig:
     run_timeout_seconds: int
     approval_policy: str
     sandbox_mode: str
+    codex_approval_decision: Optional[str] = None
+    codex_auto_input_response: Optional[str] = None
     repo_clone_command: Optional[CommandSpec] = None
     repo_bootstrap_command: Optional[CommandSpec] = None
 
@@ -96,10 +98,20 @@ class HarnessConfig:
             raise ConfigError(
                 "VERA_APPROVAL_POLICY must be one of: never, on-failure, on-request, untrusted"
             )
-        sandbox_mode = source.get("VERA_SANDBOX_MODE", "workspace-write").strip()
+        sandbox_mode = source.get("VERA_SANDBOX_MODE", "read-only").strip()
         if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
             raise ConfigError(
                 "VERA_SANDBOX_MODE must be one of: danger-full-access, read-only, workspace-write"
+            )
+        codex_approval_decision = _optional_text(source.get("VERA_CODEX_APPROVAL_DECISION"))
+        if codex_approval_decision is not None and codex_approval_decision not in {
+            "accept",
+            "acceptForSession",
+            "decline",
+            "cancel",
+        }:
+            raise ConfigError(
+                "VERA_CODEX_APPROVAL_DECISION must be one of: accept, acceptForSession, cancel, decline"
             )
 
         return cls(
@@ -113,6 +125,8 @@ class HarnessConfig:
             run_timeout_seconds=run_timeout_seconds,
             approval_policy=approval_policy,
             sandbox_mode=sandbox_mode,
+            codex_approval_decision=codex_approval_decision,
+            codex_auto_input_response=_optional_text(source.get("VERA_CODEX_AUTO_INPUT_RESPONSE")),
             repo_clone_command=_optional_command(source.get("VERA_REPO_CLONE_COMMAND"), "VERA_REPO_CLONE_COMMAND"),
             repo_bootstrap_command=_optional_command(
                 source.get("VERA_REPO_BOOTSTRAP_COMMAND"),

@@ -15,8 +15,14 @@ runtime execution explicit:
   transparency about limits.
 - **Workspace management:** resolves one local workspace per task so Codex work
   can be isolated and reversible by default.
-- **Codex runtime planning:** records the app-server command, sandbox,
-  approval, turn, and timeout settings before any live runtime is launched.
+- **Codex runtime execution:** launches the configured Codex app-server command
+  inside the task workspace, initializes the JSON-RPC session, starts a thread
+  with configured approval and sandbox policy, and starts task turns with the
+  synthesized prompt.
+- **Runtime event stream:** converts app-server notifications and server
+  requests into harness-level events so the orchestrator and Telegram status
+  layer can report completion, failure, cancellation, approval-required,
+  input-required, and timeout outcomes.
 - **Orchestration:** composes intake, policy, workspace, and runtime planning
   into a harness run.
 
@@ -30,8 +36,12 @@ runtime execution explicit:
   run.
 - Risky or irreversible behavior belongs behind explicit approval and sandbox
   settings.
+- The default runtime posture should prefer reversible behavior; broader
+  workspace or approval access must be explicitly configured.
 - Unanswered questions, blockers, and runtime limits should be surfaced rather
   than hidden.
+- Unattended Codex runs should fail closed on approval or input requests unless
+  an explicit auto-response policy is configured.
 
 ## Source
 
