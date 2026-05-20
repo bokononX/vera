@@ -80,6 +80,83 @@ ids when available, status messages sent to Telegram, and final outcome.
 `getUpdates` call, queues accepted tasks, sends `Accepted: queued.`, and exits
 without launching Codex.
 
+## Vera Agent Console
+
+The console has two local surfaces backed by the same observability provider:
+
+```sh
+PYTHONPATH=src python3 -m vera_harness --console-tui
+PYTHONPATH=src python3 -m vera_harness --console-gui --console-port 8765
+```
+
+The TUI opens in the current terminal. The GUI serves a local web app and prints
+the listening URL. Both read:
+
+- `VERA_RUN_STATE_PATH` for active, completed, blocked, and failed runs;
+- `VERA_EVENT_LOG_PATH` for structured task, Codex, source-channel, and error
+  events;
+- optional budget telemetry from `VERA_BUDGET_SNAPSHOT_PATH` and budget
+  threshold environment variables.
+
+For local smoke checks without Telegram, Codex, or secrets:
+
+```sh
+PYTHONPATH=src python3 -m vera_harness --console-tui --console-fake-state --console-smoke
+PYTHONPATH=src python3 -m vera_harness --console-gui --console-fake-state --console-smoke --console-port 0
+```
+
+The fake state includes active and completed agents, a current plan, redacted
+Telegram/source data, redacted secret fixtures, and unavailable budget telemetry.
+
+### Console Layout
+
+The top budget bar shows rate-limit, usage, and configured threshold state.
+Below it:
+
+- **Available agents** lists task/run status, source channel, task id,
+  workspace, current turn, age, and token/cost usage when events provide it.
+- **Last turn and current plan** shows the focused agent's last decision or
+  completed turn, objective, and plan entries marked as user-confirmed,
+  agent-generated, or blocker-driven.
+- **Agent log stream** shows structured status, Codex/runtime, source-channel,
+  tool-like, and error events. Event payloads are redacted by default.
+
+The TUI supports focus changes with up/down or `j`/`k`, pause/resume with `p`,
+follow toggle with `f`, and page scrolling with page up/down. The GUI supports
+click-to-focus agent selection, pause/follow controls, and event filtering.
+
+### Budget States
+
+Budget telemetry is intentionally explicit when data is absent:
+
+- `available`: a local budget/rate-limit snapshot or threshold value is
+  configured and readable.
+- `unknown`: OpenAI API/admin credentials appear to be configured, but no local
+  snapshot or response-header capture has been written yet.
+- `unavailable`: credentials and snapshots are absent, so the console cannot
+  know current rate-limit or usage state.
+
+An optional budget snapshot is a local JSON file:
+
+```json
+{
+  "rate_limits": {
+    "remaining_requests": 100,
+    "remaining_tokens": 50000,
+    "reset_requests_at": "2026-05-20T18:00:00Z",
+    "reset_tokens_at": "2026-05-20T18:05:00Z"
+  },
+  "usage": {
+    "daily_usd": 1.25,
+    "weekly_usd": 9.5,
+    "monthly_usd": 31.0,
+    "monthly_tokens": 10000
+  }
+}
+```
+
+No OpenAI or Telegram secret values belong in snapshots, event logs, or docs.
+
 ## Optional Live Smoke
 
 Use the live smoke command only after `--check-config` succeeds and a local
@@ -157,6 +234,10 @@ Other harness and Codex settings remain environment-backed:
 | `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required for `--monitor`, `--live-smoke`, `--poll-once`, and `--check-config`. |
 | `VERA_TELEGRAM_CONFIG_PATH` | No | Optional path to Telegram non-secret JSON config. Equivalent to `--telegram-config`. |
 | `VERA_RUN_STATE_PATH` | No | Local JSON file for minimal orchestration run state. Defaults to `./.vera/run_state.json`. |
+| `VERA_EVENT_LOG_PATH` | No | Local JSONL file for structured console events. Defaults to `./.vera/events.jsonl`. |
+| `VERA_BUDGET_SNAPSHOT_PATH` | No | Optional local JSON file with rate-limit and usage snapshots for the console budget bar. |
+| `VERA_MONTHLY_BUDGET_USD` | No | Optional monthly budget threshold shown in the console. |
+| `VERA_PROJECT_BUDGET_USD` | No | Optional project budget threshold shown in the console. |
 | `VERA_WORKSPACE_ROOT` | No | Root directory for per-task workspaces. Defaults to `./.vera/workspaces`. |
 | `VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS` | No | Timeout for each configured workspace clone/bootstrap command. Defaults to `300`. |
 | `VERA_WORKSPACE_RETENTION_POLICY` | No | Retention policy recorded in workspace metadata: `retain`, `cleanup_on_success`, or `cleanup_on_completion`. Defaults to `retain`. |
@@ -197,6 +278,15 @@ Do not commit actual secret values. Documentation should name variables only.
 - Timeout: the loop reports `final_status: failed` after configured retries if a
   Codex turn times out. Tune `VERA_TURN_TIMEOUT_SECONDS`,
   `VERA_RUN_TIMEOUT_SECONDS`, or investigate the Codex app-server logs.
+- Empty console: confirm `VERA_RUN_STATE_PATH` points to the same run-state file
+  used by `--monitor`, or run a fake-state smoke command to validate the local
+  surface.
+- Missing console events: confirm `VERA_EVENT_LOG_PATH` is writable by the
+  monitor process. The console can still show run state without events, but the
+  log stream and last-turn summaries will be sparse.
+- Budget shows `unknown` or `unavailable`: configure a local
+  `VERA_BUDGET_SNAPSHOT_PATH` or threshold variables, or accept the fallback
+  state when API/admin telemetry is intentionally absent.
 
 ## Development
 
@@ -246,6 +336,8 @@ Implemented now:
   workspace -> Codex runtime -> Telegram status response without live services;
 - an optional one-cycle live smoke command for configured Telegram and local
   Codex app-server environments.
+- shared console observability projection, structured JSONL event log, terminal
+  console, local web console, redaction safeguards, and budget fallback states.
 
 Not implemented in this ticket:
 

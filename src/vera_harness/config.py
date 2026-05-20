@@ -55,6 +55,10 @@ class HarnessConfig:
     telegram_state_path: Path
     telegram_unauthorized_response: Optional[str]
     run_state_path: Path
+    event_log_path: Path
+    budget_snapshot_path: Optional[Path]
+    monthly_budget_usd: Optional[float]
+    project_budget_usd: Optional[float]
     workspace_root: Path
     codex_app_server_command: CommandSpec
     max_turns: int
@@ -159,6 +163,21 @@ class HarnessConfig:
         run_state_path = Path(
             source.get("VERA_RUN_STATE_PATH", "./.vera/run_state.json")
         ).expanduser().resolve()
+        event_log_path = Path(
+            source.get("VERA_EVENT_LOG_PATH", "./.vera/events.jsonl")
+        ).expanduser().resolve()
+        budget_snapshot_path = _parse_optional_path(
+            source.get("VERA_BUDGET_SNAPSHOT_PATH"),
+            "VERA_BUDGET_SNAPSHOT_PATH",
+        )
+        monthly_budget_usd = _parse_optional_float(
+            source.get("VERA_MONTHLY_BUDGET_USD"),
+            "VERA_MONTHLY_BUDGET_USD",
+        )
+        project_budget_usd = _parse_optional_float(
+            source.get("VERA_PROJECT_BUDGET_USD"),
+            "VERA_PROJECT_BUDGET_USD",
+        )
 
         if require_secrets and not telegram_bot_token:
             raise ConfigError("VERA_TELEGRAM_BOT_TOKEN is required for live runs")
@@ -234,6 +253,10 @@ class HarnessConfig:
             telegram_state_path=telegram_state_path,
             telegram_unauthorized_response=telegram_unauthorized_response,
             run_state_path=run_state_path,
+            event_log_path=event_log_path,
+            budget_snapshot_path=budget_snapshot_path,
+            monthly_budget_usd=monthly_budget_usd,
+            project_budget_usd=project_budget_usd,
             workspace_root=workspace_root,
             codex_app_server_command=codex_command,
             max_turns=max_turns,
@@ -369,6 +392,26 @@ def _parse_path(value: Any, field_name: str) -> Path:
     if not isinstance(value, str):
         raise ConfigError("{} must be a string".format(field_name))
     return Path(value).expanduser().resolve()
+
+
+def _parse_optional_path(value: Any, field_name: str) -> Optional[Path]:
+    text = _optional_text(value)
+    if text is None:
+        return None
+    return _parse_path(text, field_name)
+
+
+def _parse_optional_float(value: Any, field_name: str) -> Optional[float]:
+    text = _optional_text(value)
+    if text is None:
+        return None
+    try:
+        parsed = float(text)
+    except ValueError:
+        raise ConfigError("{} must be a number".format(field_name))
+    if parsed < 0:
+        raise ConfigError("{} must be zero or greater".format(field_name))
+    return parsed
 
 
 def _parse_positive_int(value: Any, field_name: str, default: int) -> int:

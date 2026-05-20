@@ -20,3 +20,6 @@
 - 2026-05-20: Updated the Vera harness concept with the operational
   Telegram-to-Codex monitor loop, fake/live smoke paths, terminal Telegram
   failure replies, and audit-suitable log constraints.
+- 2026-05-20: Updated the Vera harness concept with shared console
+  observability, terminal and local web console surfaces, structured event-log
+  constraints, redaction defaults, and budget fallback states.
