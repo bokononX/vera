@@ -14,6 +14,9 @@ runtime execution explicit:
 - **Telegram state:** persists processed update ids and compact task lifecycle
   metadata so restarts do not duplicate accepted work while avoiding raw chat
   history storage.
+- **Telegram configuration:** keeps non-secret connectivity settings in a
+  local JSON config file while leaving the bot token in an environment-backed
+  secret path.
 - **Policy prompt:** encodes Herald's role as a representative of the user,
   including evidence-based reasoning, minimal footprint, reversibility, and
   transparency about limits.
@@ -38,6 +41,11 @@ runtime execution explicit:
   dependencies.
 - Live modes should validate secrets and allow-list settings before accepting
   external tasks.
+- Telegram bot tokens must not be written to committed config, local templates,
+  logs, or config-check output.
+- Non-secret Telegram connectivity settings should prefer the local config file
+  interface over environment variables; env compatibility is only a migration
+  fallback when no config file is present.
 - Telegram transport details should stay isolated from Codex and workspace
   planning.
 - The harness should collect and persist only the task context and lifecycle
