@@ -18,9 +18,11 @@ class HarnessConfigTests(unittest.TestCase):
                     "VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS": "13",
                     "VERA_TELEGRAM_STATE_PATH": str(Path(temp_dir, "telegram-state.json")),
                     "VERA_TELEGRAM_UNAUTHORIZED_RESPONSE": "This chat is not authorized.",
+                    "VERA_RUN_STATE_PATH": str(Path(temp_dir, "run-state.json")),
                     "VERA_WORKSPACE_ROOT": temp_dir,
                     "VERA_CODEX_APP_SERVER_COMMAND": "codex app-server --port 0",
                     "VERA_MAX_TURNS": "7",
+                    "VERA_MAX_RETRIES": "2",
                     "VERA_TURN_TIMEOUT_SECONDS": "11",
                     "VERA_RUN_TIMEOUT_SECONDS": "22",
                     "VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS": "33",
@@ -42,9 +44,11 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_request_timeout_seconds, 13)
         self.assertEqual(config.telegram_state_path, Path(temp_dir, "telegram-state.json").resolve())
         self.assertEqual(config.telegram_unauthorized_response, "This chat is not authorized.")
+        self.assertEqual(config.run_state_path, Path(temp_dir, "run-state.json").resolve())
         self.assertEqual(config.workspace_root, Path(temp_dir).resolve())
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server", "--port", "0"))
         self.assertEqual(config.max_turns, 7)
+        self.assertEqual(config.max_retries, 2)
         self.assertEqual(config.turn_timeout_seconds, 11)
         self.assertEqual(config.run_timeout_seconds, 22)
         self.assertEqual(config.workspace_bootstrap_timeout_seconds, 33)
@@ -67,7 +71,9 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_request_timeout_seconds, 35)
         self.assertEqual(config.telegram_state_path.name, "telegram_state.json")
         self.assertIsNone(config.telegram_unauthorized_response)
+        self.assertEqual(config.run_state_path.name, "run_state.json")
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server"))
+        self.assertEqual(config.max_retries, 1)
         self.assertEqual(config.workspace_bootstrap_timeout_seconds, 300)
         self.assertEqual(config.workspace_retention_policy, "retain")
         self.assertEqual(config.sandbox_mode, "read-only")
@@ -170,6 +176,7 @@ class HarnessConfigTests(unittest.TestCase):
         invalid_cases = [
             {"VERA_ALLOWED_CHAT_IDS": "abc"},
             {"VERA_MAX_TURNS": "0"},
+            {"VERA_MAX_RETRIES": "-1"},
             {"VERA_TURN_TIMEOUT_SECONDS": "-1"},
             {"VERA_TELEGRAM_API_BASE_URL": "api.telegram.org"},
             {"VERA_TELEGRAM_POLL_TIMEOUT_SECONDS": "0"},

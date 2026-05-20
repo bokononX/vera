@@ -6,21 +6,55 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Mapping, Optional, Tuple
 
 
 class HarnessRunStatus(str, Enum):
     PLANNED = "planned"
     RUNNING = "running"
     COMPLETED = "completed"
+    BLOCKED = "blocked"
+    APPROVAL_REQUIRED = "approval_required"
+    INPUT_REQUIRED = "input_required"
     FAILED = "failed"
+    DUPLICATE_ACTIVE = "duplicate_active"
 
 
 class CodexTurnStatus(str, Enum):
     PLANNED = "planned"
     COMPLETED = "completed"
+    APPROVAL_REQUIRED = "approval_required"
+    INPUT_REQUIRED = "input_required"
+    CANCELLED = "cancelled"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
+
+
+class TaskEventType(str, Enum):
+    """Structured task lifecycle events emitted by the orchestrator."""
+
+    DUPLICATE_ACTIVE = "duplicate_active"
+    RUN_STARTED = "run_started"
+    WORKSPACE_PREPARED = "workspace_prepared"
+    PROMPT_BUILT = "prompt_built"
+    CODEX_TURN_STARTED = "codex_turn_started"
+    CODEX_RUNTIME_EVENT = "codex_runtime_event"
+    CODEX_TURN_COMPLETED = "codex_turn_completed"
+    DECISION_RECORDED = "decision_recorded"
+    RETRY_SCHEDULED = "retry_scheduled"
+    RUN_COMPLETED = "run_completed"
+    RUN_BLOCKED = "run_blocked"
+    RUN_FAILED = "run_failed"
+
+
+class OrchestrationDecision(str, Enum):
+    """Supervisor decision after a Codex turn."""
+
+    CONTINUE = "continue"
+    COMPLETE = "complete"
+    RETRY = "retry"
+    BLOCK = "block"
+    FAIL = "fail"
 
 
 class WorkspaceReusePolicy(str, Enum):
@@ -120,6 +154,27 @@ class HarnessRun:
     status: HarnessRunStatus = HarnessRunStatus.PLANNED
     dry_run: bool = False
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True)
+class RunState:
+    """Persisted minimal state for restart-safe task orchestration."""
+
+    run_id: str
+    task_id: str
+    status: HarnessRunStatus
+    turns_completed: int = 0
+    dry_run: bool = False
+    workspace_path: Optional[str] = None
+    last_error: Optional[str] = None
+    last_decision: Optional[str] = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def is_active(self) -> bool:
+        return self.status in {HarnessRunStatus.PLANNED, HarnessRunStatus.RUNNING}
 
 
 @dataclass(frozen=True)
@@ -132,3 +187,17 @@ class CodexTurnResult:
     error: Optional[str] = None
     elapsed_seconds: Optional[float] = None
     unanswered_questions: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TaskEvent:
+    """Task lifecycle event suitable for logs and Telegram status mapping."""
+
+    type: TaskEventType
+    task_id: str
+    run_id: str
+    status: Optional[str] = None
+    message: Optional[str] = None
+    turn_number: Optional[int] = None
+    payload: Mapping[str, object] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

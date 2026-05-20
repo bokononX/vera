@@ -1,10 +1,11 @@
 # Vera Harness
 
 This repository contains the Python scaffold for the Vera agent harness. It can
-load configuration, synthesize the Herald policy prompt, resolve a per-task
-workspace, poll Telegram through the Bot API, queue authorized Telegram tasks,
-print dry-run Codex app-server invocation plans, and drive a Codex app-server
-turn over newline-delimited JSON-RPC through a testable runtime adapter.
+load configuration, synthesize the Herald/The Place/Vera policy prompt, resolve
+a per-task workspace, poll Telegram through the Bot API, queue authorized
+Telegram tasks, process dry-run tasks end to end with a fake Codex runtime, and
+drive Codex app-server turns over newline-delimited JSON-RPC through a testable
+runtime adapter.
 
 ## Local Dry Run
 
@@ -23,6 +24,7 @@ The command prints:
 - the local workspace path;
 - the synthesized prompt and policy summary;
 - the planned Codex app-server launch settings;
+- the fake-runtime final decision and structured event sequence;
 - confirmation that Telegram and Codex network/runtime calls were skipped.
 
 Dry runs default to `./.vera/workspaces` for local task workspaces. Workspace
@@ -110,11 +112,13 @@ Other harness and Codex settings remain environment-backed:
 | --- | --- | --- |
 | `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required for `--poll-once` and `--check-config`. |
 | `VERA_TELEGRAM_CONFIG_PATH` | No | Optional path to Telegram non-secret JSON config. Equivalent to `--telegram-config`. |
+| `VERA_RUN_STATE_PATH` | No | Local JSON file for minimal orchestration run state. Defaults to `./.vera/run_state.json`. |
 | `VERA_WORKSPACE_ROOT` | No | Root directory for per-task workspaces. Defaults to `./.vera/workspaces`. |
 | `VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS` | No | Timeout for each configured workspace clone/bootstrap command. Defaults to `300`. |
 | `VERA_WORKSPACE_RETENTION_POLICY` | No | Retention policy recorded in workspace metadata: `retain`, `cleanup_on_success`, or `cleanup_on_completion`. Defaults to `retain`. |
 | `VERA_CODEX_APP_SERVER_COMMAND` | No | Shell-style command used to launch the Codex app server. Defaults to `codex app-server`. |
 | `VERA_MAX_TURNS` | No | Maximum Codex turns per harness run. Defaults to `20`. |
+| `VERA_MAX_RETRIES` | No | Retry budget for failed, cancelled, or timed-out Codex turns. Defaults to `1`. |
 | `VERA_TURN_TIMEOUT_SECONDS` | No | Timeout for one Codex turn. Defaults to `300`. |
 | `VERA_RUN_TIMEOUT_SECONDS` | No | Timeout for the whole harness run. Defaults to `1800`. |
 | `VERA_APPROVAL_POLICY` | No | Planned Codex approval policy: `untrusted`, `on-request`, `on-failure`, or `never`. Defaults to `on-request`. |
@@ -143,7 +147,8 @@ Implemented now:
 
 - configuration parsing and validation;
 - domain models for Telegram tasks, harness runs, workspaces, workspace reuse
-  policy, bootstrap diagnostics, and Codex turn results;
+  policy, bootstrap diagnostics, persistent run state, task events, and Codex
+  turn results;
 - module boundaries for config, Telegram intake, Telegram state persistence,
   workspace management, Codex runtime planning/execution, prompt/policy, and
   orchestration;
@@ -156,12 +161,17 @@ Implemented now:
 - deterministic isolated workspace lifecycle with explicit reuse/fresh/existing
   policies, metadata recording, root escape protection, bounded bootstrap
   command execution, and guarded cleanup hooks;
-- dry-run CLI output for local validation;
+- dry-run CLI output that runs prompt construction, workspace selection, fake
+  Codex runtime execution, final decision mapping, and event emission locally;
 - Codex app-server launch over stdio JSON-RPC;
 - `initialize`, `thread/start`, and `turn/start` request flow;
 - structured runtime events for server notifications, approval-required,
   input-required, completion, failure, cancellation, timeout, and process exit;
-- fail-closed unattended behavior unless explicit auto-response config is set.
+- fail-closed unattended behavior unless explicit auto-response config is set;
+- orchestration loop over normalized tasks with workspace preparation, policy
+  prompt synthesis, up-to-max-turn Codex execution, continuation/completion/
+  retry/block/failure decisions, structured task events, and minimal JSON run
+  state that prevents duplicate active task runs across restarts.
 
 Not implemented in this ticket:
 

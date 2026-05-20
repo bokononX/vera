@@ -12,5 +12,8 @@
 - 2026-05-20: Updated the Vera harness concept with isolated workspace
   lifecycle policy, root escape protection, bounded bootstrap diagnostics, and
   cleanup constraints.
+- 2026-05-20: Updated the Vera harness concept with persisted orchestration,
+  CAT-131 prompt policy constraints, task events, turn decisions, retry limits,
+  and duplicate active-run prevention.
 - 2026-05-20: Updated the Vera harness concept with Telegram config-file
   boundaries and bot-token secret separation.
