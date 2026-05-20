@@ -17,3 +17,6 @@
   and duplicate active-run prevention.
 - 2026-05-20: Updated the Vera harness concept with Telegram config-file
   boundaries and bot-token secret separation.
+- 2026-05-20: Updated the Vera harness concept with the operational
+  Telegram-to-Codex monitor loop, fake/live smoke paths, terminal Telegram
+  failure replies, and audit-suitable log constraints.

@@ -36,6 +36,7 @@ class TelegramTaskStatus(str, Enum):
     STARTED = "started"
     COMPLETED = "completed"
     BLOCKED = "blocked"
+    FAILED = "failed"
 
 
 class TelegramUpdateStatus(str, Enum):
@@ -408,6 +409,12 @@ def format_telegram_status(
         return "Started: working on it."
     if normalized_status is TelegramTaskStatus.COMPLETED:
         return "Completed."
+    if normalized_status is TelegramTaskStatus.FAILED:
+        message = "Failed: Vera could not complete the task."
+        detail = _status_detail(reason)
+        if detail:
+            return "{} {}".format(message, detail)
+        return message
 
     message = "Blocked: I need your judgment before continuing."
     detail = _status_detail(reason)

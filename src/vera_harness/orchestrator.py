@@ -31,7 +31,14 @@ from .models import (
 )
 from .prompt import PromptPolicy, build_prompt_policy
 from .state import JsonRunStateStore
-from .telegram import TelegramIntake, TelegramIntakeOutcome, TelegramLongPollingIntake, TelegramUpdateStatus
+from .telegram import (
+    TelegramIntake,
+    TelegramIntakeOutcome,
+    TelegramLongPollingIntake,
+    TelegramTaskStatus,
+    TelegramUpdateStatus,
+    format_telegram_status,
+)
 from .workspace import WorkspaceBootstrapError, WorkspaceManager
 
 
@@ -91,6 +98,36 @@ DryRunResult = TaskRunResult
 class PollOnceResult:
     outcomes: Tuple[TelegramIntakeOutcome, ...]
     queued_tasks: Tuple[TelegramTask, ...]
+
+
+@dataclass(frozen=True)
+class TelegramStatusDelivery:
+    """A Telegram status message emitted for a task lifecycle transition."""
+
+    update_id: Optional[int]
+    task_id: Optional[str]
+    chat_id: Optional[int]
+    message_id: Optional[int]
+    status: TelegramTaskStatus
+    text: str
+    reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TelegramTaskRunResult:
+    """A task run correlated back to the Telegram update that produced it."""
+
+    update_id: Optional[int]
+    result: TaskRunResult
+
+
+@dataclass(frozen=True)
+class TelegramLoopResult:
+    """One Telegram polling cycle plus any Codex task runs it produced."""
+
+    poll_result: PollOnceResult
+    task_runs: Tuple[TelegramTaskRunResult, ...]
+    status_deliveries: Tuple[TelegramStatusDelivery, ...]
 
 
 class VeraHarness:
@@ -408,6 +445,68 @@ class VeraHarness:
             queued_tasks=polling_intake.queue.queued_tasks(),
         )
 
+    def run_telegram_poll_once(
+        self,
+        polling_intake: Optional[TelegramLongPollingIntake] = None,
+        runtime: Optional[CodexRuntime] = None,
+        dry_run: bool = False,
+        create_workspace: bool = True,
+        workspace_policy: WorkspaceReusePolicy = WorkspaceReusePolicy.REUSE,
+        run_bootstrap: bool = True,
+    ) -> TelegramLoopResult:
+        """Poll Telegram once, run accepted tasks, and send lifecycle statuses."""
+
+        intake = polling_intake or TelegramLongPollingIntake(self._config)
+        outcomes = intake.poll_once()
+        poll_result = PollOnceResult(
+            outcomes=outcomes,
+            queued_tasks=intake.queue.queued_tasks(),
+        )
+        task_update_ids = {
+            outcome.task.task_id: outcome.update_id
+            for outcome in outcomes
+            if outcome.task is not None
+        }
+        deliveries: List[TelegramStatusDelivery] = []
+        task_runs: List[TelegramTaskRunResult] = []
+
+        for outcome in outcomes:
+            if outcome.task is not None and outcome.status == TelegramUpdateStatus.ACCEPTED:
+                deliveries.append(
+                    _status_delivery(
+                        outcome.task,
+                        outcome.update_id,
+                        TelegramTaskStatus.ACCEPTED,
+                    )
+                )
+
+        for task in intake.queue.drain():
+            update_id = task_update_ids.get(task.task_id)
+            intake.send_task_status(task, TelegramTaskStatus.STARTED)
+            deliveries.append(
+                _status_delivery(task, update_id, TelegramTaskStatus.STARTED)
+            )
+            result = self.run_task(
+                task,
+                dry_run=dry_run,
+                create_workspace=create_workspace,
+                workspace_policy=workspace_policy,
+                run_bootstrap=run_bootstrap,
+                runtime=runtime,
+            )
+            final_status, reason = _telegram_status_for_result(result)
+            intake.send_task_status(task, final_status, reason=reason)
+            deliveries.append(
+                _status_delivery(task, update_id, final_status, reason=reason)
+            )
+            task_runs.append(TelegramTaskRunResult(update_id=update_id, result=result))
+
+        return TelegramLoopResult(
+            poll_result=poll_result,
+            task_runs=tuple(task_runs),
+            status_deliveries=tuple(deliveries),
+        )
+
     def _emit(
         self,
         events: List[TaskEvent],
@@ -588,6 +687,133 @@ def format_poll_once(result: PollOnceResult) -> str:
             "codex_launch: skipped (queued only)",
         ]
     )
+
+
+def format_telegram_loop(
+    result: TelegramLoopResult,
+    title: str = "Vera Telegram-to-Codex loop",
+) -> str:
+    counts = {
+        status: sum(1 for outcome in result.poll_result.outcomes if outcome.status == status)
+        for status in TelegramUpdateStatus
+    }
+    lines = [
+        title,
+        "updates_seen: {}".format(len(result.poll_result.outcomes)),
+        "accepted: {}".format(counts[TelegramUpdateStatus.ACCEPTED]),
+        "rejected: {}".format(counts[TelegramUpdateStatus.REJECTED]),
+        "blocked: {}".format(counts[TelegramUpdateStatus.BLOCKED]),
+        "duplicates: {}".format(counts[TelegramUpdateStatus.DUPLICATE]),
+        "ignored: {}".format(counts[TelegramUpdateStatus.IGNORED]),
+        "queued_tasks: {}".format(len(result.poll_result.queued_tasks)),
+        "task_runs: {}".format(len(result.task_runs)),
+        "",
+        "task_run_log:",
+    ]
+    if not result.task_runs:
+        lines.append("- none")
+    for task_run in result.task_runs:
+        run = task_run.result
+        metadata = _last_metadata(run)
+        lines.extend(
+            [
+                "- task_id: {}".format(run.task.task_id),
+                "  telegram_chat_id: {}".format(run.task.chat_id),
+                "  telegram_update_id: {}".format(_display_optional(task_run.update_id)),
+                "  telegram_message_id: {}".format(run.task.message_id),
+                "  run_id: {}".format(run.harness_run.run_id),
+                "  workspace_path: {}".format(run.workspace.path),
+                "  codex_thread_id: {}".format(_display_optional(metadata.thread_id if metadata else None)),
+                "  codex_turn_id: {}".format(_display_optional(metadata.turn_id if metadata else None)),
+                "  final_status: {}".format(run.harness_run.status.value),
+                "  final_decision: {}".format(run.final_decision.action.value),
+                "  final_reason: {}".format(_compact_log_value(run.final_decision.reason)),
+            ]
+        )
+
+    lines.extend(["", "telegram_status_messages:"])
+    if not result.status_deliveries:
+        lines.append("- none")
+    for delivery in result.status_deliveries:
+        lines.extend(
+            [
+                "- status: {}".format(delivery.status.value),
+                "  task_id: {}".format(_display_optional(delivery.task_id)),
+                "  telegram_chat_id: {}".format(_display_optional(delivery.chat_id)),
+                "  telegram_update_id: {}".format(_display_optional(delivery.update_id)),
+                "  telegram_message_id: {}".format(_display_optional(delivery.message_id)),
+                "  telegram_text: {}".format(delivery.text),
+            ]
+        )
+
+    lines.extend(["", "event_sequence:"])
+    any_events = False
+    for task_run in result.task_runs:
+        for event in task_run.result.events:
+            any_events = True
+            thread_id = event.payload.get("thread_id")
+            turn_id = event.payload.get("turn_id")
+            lines.append(
+                "- task_id: {} run_id: {} event: {} status: {} turn: {} codex_thread_id: {} codex_turn_id: {}".format(
+                    event.task_id,
+                    event.run_id,
+                    event.type.value,
+                    _display_optional(event.status),
+                    _display_optional(event.turn_number),
+                    _display_optional(thread_id if isinstance(thread_id, str) else None),
+                    _display_optional(turn_id if isinstance(turn_id, str) else None),
+                )
+            )
+    if not any_events:
+        lines.append("- none")
+    return "\n".join(lines)
+
+
+def _telegram_status_for_result(
+    result: TaskRunResult,
+) -> Tuple[TelegramTaskStatus, Optional[str]]:
+    status = result.harness_run.status
+    if status == HarnessRunStatus.COMPLETED:
+        return TelegramTaskStatus.COMPLETED, None
+    if status == HarnessRunStatus.FAILED:
+        return TelegramTaskStatus.FAILED, result.final_decision.reason
+    return TelegramTaskStatus.BLOCKED, result.final_decision.reason
+
+
+def _status_delivery(
+    task: TelegramTask,
+    update_id: Optional[int],
+    status: TelegramTaskStatus,
+    reason: Optional[str] = None,
+) -> TelegramStatusDelivery:
+    return TelegramStatusDelivery(
+        update_id=update_id,
+        task_id=task.task_id,
+        chat_id=task.chat_id,
+        message_id=task.message_id,
+        status=status,
+        text=format_telegram_status(status, reason=reason),
+        reason=reason,
+    )
+
+
+def _last_metadata(result: TaskRunResult) -> Optional[CodexSessionMetadata]:
+    for turn_result in reversed(result.turn_results):
+        return turn_result.metadata
+    return None
+
+
+def _display_optional(value: object) -> str:
+    if value is None:
+        return "not available"
+    return str(value)
+
+
+def _compact_log_value(value: Optional[str]) -> str:
+    if value is None:
+        return "not available"
+    compact = " ".join(value.split())
+    return compact[:280] if compact else "not available"
 
 
 def _decide_after_turn(

@@ -17,8 +17,9 @@ from vera_harness.models import (
     TaskEventType,
     TelegramTask,
 )
-from vera_harness.orchestrator import VeraHarness, format_dry_run
+from vera_harness.orchestrator import FakeCodexRuntime, VeraHarness, format_dry_run, format_telegram_loop
 from vera_harness.state import JsonRunStateStore
+from vera_harness.telegram import TelegramLongPollingIntake, TelegramUpdateStore
 
 
 class DryRunOrchestrationTests(unittest.TestCase):
@@ -212,6 +213,135 @@ class OrchestrationLoopTests(unittest.TestCase):
             self.assertEqual(result.events[0].type, TaskEventType.DUPLICATE_ACTIVE)
 
 
+class TelegramToCodexSmokeTests(unittest.TestCase):
+    def test_fake_telegram_update_runs_workspace_codex_and_status_responses(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                },
+            )
+            api = FakeTelegramApi(
+                (
+                    _message_update(
+                        update_id=77,
+                        chat_id=100,
+                        user_id=200,
+                        message_id=300,
+                        text="Sensitive task body should not appear in logs",
+                    ),
+                )
+            )
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+            )
+            harness = VeraHarness(config)
+
+            result = harness.run_telegram_poll_once(
+                polling_intake=intake,
+                runtime=FakeCodexRuntime(),
+                dry_run=True,
+                run_bootstrap=False,
+            )
+            output = format_telegram_loop(result, title="test smoke")
+
+            self.assertEqual(len(result.task_runs), 1)
+            task_result = result.task_runs[0].result
+            self.assertEqual(result.task_runs[0].update_id, 77)
+            self.assertEqual(task_result.task.task_id, "telegram-100-300")
+            self.assertTrue(task_result.workspace.path.is_dir())
+            self.assertEqual(task_result.harness_run.status, HarnessRunStatus.COMPLETED)
+            self.assertEqual(
+                [message["text"] for message in api.sent_messages],
+                ["Accepted: queued.", "Started: working on it.", "Completed."],
+            )
+            self.assertIn("task_id: telegram-100-300", output)
+            self.assertIn("telegram_chat_id: 100", output)
+            self.assertIn("telegram_update_id: 77", output)
+            self.assertIn("workspace_path: {}".format(task_result.workspace.path), output)
+            self.assertIn("codex_thread_id: fake-thread", output)
+            self.assertIn("codex_turn_id: fake-turn-1", output)
+            self.assertIn("final_status: completed", output)
+            self.assertIn("telegram_text: Started: working on it.", output)
+            self.assertNotIn("Sensitive task body", output)
+
+    def test_failed_runtime_sends_failed_telegram_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                    "VERA_MAX_RETRIES": "0",
+                },
+            )
+            api = FakeTelegramApi((_message_update(update_id=78),))
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+            )
+            runtime = ScriptedRuntime(
+                (
+                    _runtime_result(
+                        CodexRunStatus.FAILED,
+                        "failed",
+                        error="failed to launch Codex app-server: missing codex",
+                    ),
+                )
+            )
+
+            result = VeraHarness(config).run_telegram_poll_once(
+                polling_intake=intake,
+                runtime=runtime,
+                run_bootstrap=False,
+            )
+            output = format_telegram_loop(result)
+
+            self.assertEqual(result.task_runs[0].result.harness_run.status, HarnessRunStatus.FAILED)
+            self.assertIn("Failed: Vera could not complete the task.", api.sent_messages[-1]["text"])
+            self.assertIn("missing codex", api.sent_messages[-1]["text"])
+            self.assertIn("final_status: failed", output)
+            self.assertIn("failed to launch Codex app-server", output)
+
+    def test_workspace_bootstrap_failure_sends_failed_telegram_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                    "VERA_REPO_BOOTSTRAP_COMMAND": (
+                        "python3 -c \"import sys; sys.stderr.write('bad bootstrap'); sys.exit(7)\""
+                    ),
+                },
+            )
+            api = FakeTelegramApi((_message_update(update_id=79),))
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+            )
+            runtime = ScriptedRuntime((_runtime_result(CodexRunStatus.COMPLETED, "completed"),))
+
+            result = VeraHarness(config).run_telegram_poll_once(
+                polling_intake=intake,
+                runtime=runtime,
+            )
+            output = format_telegram_loop(result)
+
+            self.assertEqual(result.task_runs[0].result.harness_run.status, HarnessRunStatus.FAILED)
+            self.assertEqual(runtime.calls, 0)
+            self.assertIn("Failed: Vera could not complete the task.", api.sent_messages[-1]["text"])
+            self.assertIn("bootstrap command failed", api.sent_messages[-1]["text"])
+            self.assertIn("final_status: failed", output)
+            self.assertIn("bootstrap command failed", output)
+
+
 class ScriptedRuntime:
     def __init__(self, results):
         self._results = list(results)
@@ -230,6 +360,7 @@ def _config(temp_dir, extra_env=None):
     env = {
         "VERA_WORKSPACE_ROOT": temp_dir,
         "VERA_RUN_STATE_PATH": str(Path(temp_dir, "run-state.json")),
+        "VERA_TELEGRAM_STATE_PATH": str(Path(temp_dir, "telegram-state.json")),
         "VERA_CODEX_APP_SERVER_COMMAND": "fake-codex app-server",
     }
     if extra_env:
@@ -239,6 +370,41 @@ def _config(temp_dir, extra_env=None):
 
 def _task():
     return TelegramTask.from_message(chat_id=1, user_id=2, message_id=3, text="work")
+
+
+class FakeTelegramApi:
+    def __init__(self, updates):
+        self._updates = tuple(updates)
+        self.sent_messages = []
+
+    def get_updates(self, offset, timeout):
+        return tuple(
+            update
+            for update in self._updates
+            if offset is None or update["update_id"] >= offset
+        )
+
+    def send_message(self, chat_id, text, reply_to_message_id=None):
+        self.sent_messages.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "reply_to_message_id": reply_to_message_id,
+            }
+        )
+        return {"message_id": len(self.sent_messages)}
+
+
+def _message_update(update_id, chat_id=100, user_id=200, message_id=300, text="Do the work"):
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": message_id,
+            "chat": {"id": chat_id},
+            "from": {"id": user_id, "username": "vera_user"},
+            "text": text,
+        },
+    }
 
 
 def _runtime_result(status, marker, error=None):

@@ -3,9 +3,8 @@
 This repository contains the Python scaffold for the Vera agent harness. It can
 load configuration, synthesize the Herald/The Place/Vera policy prompt, resolve
 a per-task workspace, poll Telegram through the Bot API, queue authorized
-Telegram tasks, process dry-run tasks end to end with a fake Codex runtime, and
-drive Codex app-server turns over newline-delimited JSON-RPC through a testable
-runtime adapter.
+Telegram tasks, run accepted tasks through a fake or live Codex runtime, and
+send concise Telegram status replies for the task lifecycle.
 
 ## Local Dry Run
 
@@ -32,11 +31,34 @@ paths are derived from stable Telegram task ids, sanitized to a single safe path
 segment, and validated after resolution so symlinks cannot move Codex outside
 the configured workspace root. That path is ignored by git.
 
-## Telegram Polling
+## Fake End-to-End Smoke
 
-Live Telegram intake uses Bot API long polling. It currently queues accepted
-tasks for orchestration and sends Telegram status replies, but it does not
-launch Codex.
+The fake smoke path exercises the Telegram intake, task queue, workspace
+lifecycle, policy prompt, fake Codex runtime, final supervisor decision, and
+Telegram status responses without live Telegram or real Codex.
+
+```sh
+PYTHONPATH=src python3 -m vera_harness --fake-smoke \
+  --message "Summarize the current project state" \
+  --chat-id 100 \
+  --user-id 200 \
+  --message-id 300 \
+  --update-id 700 \
+  --workspace-root ./.vera/fake-smoke-workspaces
+```
+
+The command prints an operational log with the task id, Telegram chat/update/
+message ids, workspace path, Codex thread/turn ids when available, Telegram
+status texts, event sequence, and final outcome. It does not require
+`VERA_TELEGRAM_BOT_TOKEN`, does not contact Telegram, does not launch Codex, and
+does not print the raw Telegram task text.
+
+## Operational Monitor
+
+Live Telegram intake uses Bot API long polling. The production monitor command
+polls Telegram, queues authorized text messages, prepares an isolated workspace,
+runs Codex through the configured app-server command, and sends Telegram status
+replies for accepted, started, blocked, failed, and completed outcomes.
 
 ```sh
 mkdir -p .vera
@@ -45,14 +67,36 @@ cp config/telegram.example.json .vera/telegram_config.json
 export VERA_TELEGRAM_BOT_TOKEN="..."
 
 PYTHONPATH=src python3 -m vera_harness --check-config
-PYTHONPATH=src python3 -m vera_harness --poll-once
+PYTHONPATH=src python3 -m vera_harness --monitor
 ```
 
-`--poll-once` performs one `getUpdates` call, suppresses updates already
-recorded in the local state file, converts authorized text messages into
-minimal `TelegramTask` objects, queues them in memory for the current process,
-and sends concise Telegram replies such as `Accepted: queued.` or
-`Blocked: I need your judgment before continuing.`
+`--monitor` runs until interrupted. Use `--max-poll-cycles N` to stop after a
+bounded number of polling cycles, and `--poll-interval-seconds N` to control the
+sleep between cycles. Each cycle prints an audit-friendly log that includes the
+task id, Telegram chat/update/message ids, workspace path, Codex session/turn
+ids when available, status messages sent to Telegram, and final outcome.
+
+`--poll-once` remains available for intake-only diagnostics. It performs one
+`getUpdates` call, queues accepted tasks, sends `Accepted: queued.`, and exits
+without launching Codex.
+
+## Optional Live Smoke
+
+Use the live smoke command only after `--check-config` succeeds and a local
+Codex app-server command is available. It polls Telegram once, runs any accepted
+tasks through the configured Codex runtime, sends final Telegram statuses, and
+then exits.
+
+```sh
+export VERA_TELEGRAM_BOT_TOKEN="..."
+export VERA_CODEX_APP_SERVER_COMMAND="codex app-server"
+
+PYTHONPATH=src python3 -m vera_harness --live-smoke
+```
+
+No secret values belong in the repository. Keep bot tokens in the environment
+or another local secret manager, and keep `.vera/telegram_config.json` limited
+to non-secret allow-list and polling settings.
 
 Unauthorized chats/users are ignored by default. Set
 `telegram.unauthorized_response` in the local Telegram config file to send a
@@ -110,7 +154,7 @@ Other harness and Codex settings remain environment-backed:
 
 | Variable | Required for dry run | Description |
 | --- | --- | --- |
-| `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required for `--poll-once` and `--check-config`. |
+| `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required for `--monitor`, `--live-smoke`, `--poll-once`, and `--check-config`. |
 | `VERA_TELEGRAM_CONFIG_PATH` | No | Optional path to Telegram non-secret JSON config. Equivalent to `--telegram-config`. |
 | `VERA_RUN_STATE_PATH` | No | Local JSON file for minimal orchestration run state. Defaults to `./.vera/run_state.json`. |
 | `VERA_WORKSPACE_ROOT` | No | Root directory for per-task workspaces. Defaults to `./.vera/workspaces`. |
@@ -129,6 +173,30 @@ Other harness and Codex settings remain environment-backed:
 | `VERA_REPO_BOOTSTRAP_COMMAND` | No | Optional shell-style command executed in a newly prepared workspace after the clone command. Not executed in dry run. |
 
 Do not commit actual secret values. Documentation should name variables only.
+
+## Troubleshooting
+
+- Missing Telegram auth: `VERA_TELEGRAM_BOT_TOKEN is required for live runs`
+  means `--monitor`, `--poll-once`, `--check-config`, or `--live-smoke` was run
+  without a bot token in the environment.
+- Missing allowed chat config:
+  `telegram.allowed_chat_ids or telegram.allowed_user_ids is required for live runs`
+  means the local Telegram config or environment lacks an allow-list. Add the
+  authorized chat and/or user ids to `.vera/telegram_config.json`.
+- Workspace bootstrap failure: the loop reports `final_status: failed` and the
+  workspace metadata records `bootstrap_status`, command output, return code,
+  and error text. Fix `VERA_REPO_CLONE_COMMAND`, `VERA_REPO_BOOTSTRAP_COMMAND`,
+  or the workspace contents, then send a new Telegram task.
+- Codex startup failure: the task log reports `final_status: failed` with a
+  reason such as `failed to launch Codex app-server`. Check
+  `VERA_CODEX_APP_SERVER_COMMAND`, local Codex installation, and PATH.
+- Approval required: the loop reports `final_status: approval_required` and
+  Telegram receives a blocked status. Set a deliberate
+  `VERA_CODEX_APPROVAL_DECISION` only when unattended approval is safe for the
+  configured environment.
+- Timeout: the loop reports `final_status: failed` after configured retries if a
+  Codex turn times out. Tune `VERA_TURN_TIMEOUT_SECONDS`,
+  `VERA_RUN_TIMEOUT_SECONDS`, or investigate the Codex app-server logs.
 
 ## Development
 
@@ -157,7 +225,7 @@ Implemented now:
 - duplicate update suppression across restarts through local offset
   persistence;
 - concise Telegram status replies for accepted, rejected, started, completed,
-  and blocked task states;
+  blocked, and failed task states;
 - deterministic isolated workspace lifecycle with explicit reuse/fresh/existing
   policies, metadata recording, root escape protection, bounded bootstrap
   command execution, and guarded cleanup hooks;
@@ -172,8 +240,14 @@ Implemented now:
   prompt synthesis, up-to-max-turn Codex execution, continuation/completion/
   retry/block/failure decisions, structured task events, and minimal JSON run
   state that prevents duplicate active task runs across restarts.
+- a production Telegram monitor loop that drains accepted tasks into the Codex
+  runtime and reports final status back to Telegram;
+- a fake end-to-end smoke command that covers Telegram update -> task ->
+  workspace -> Codex runtime -> Telegram status response without live services;
+- an optional one-cycle live smoke command for configured Telegram and local
+  Codex app-server environments.
 
 Not implemented in this ticket:
 
 - Telegram webhook handling;
-- continuous multi-task orchestration beyond the in-memory accepted-task queue.
+- concurrent multi-worker scheduling for multiple long-running tasks.

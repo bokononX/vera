@@ -86,6 +86,63 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(captured["config"].telegram_poll_timeout_seconds, 9)
         self.assertEqual(captured["config"].telegram_state_path, state_path.resolve())
 
+    def test_fake_smoke_runs_without_live_secrets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = io.StringIO()
+
+            with patch.dict(os.environ, {}, clear=True):
+                with contextlib.redirect_stdout(output):
+                    status = cli.main(
+                        [
+                            "--fake-smoke",
+                            "--message",
+                            "Sensitive fake smoke task text",
+                            "--chat-id",
+                            "100",
+                            "--user-id",
+                            "200",
+                            "--message-id",
+                            "300",
+                            "--update-id",
+                            "77",
+                            "--workspace-root",
+                            temp_dir,
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        rendered = output.getvalue()
+        self.assertIn("Vera Telegram-to-Codex fake smoke", rendered)
+        self.assertIn("task_id: telegram-100-300", rendered)
+        self.assertIn("telegram_update_id: 77", rendered)
+        self.assertIn("codex_thread_id: fake-thread", rendered)
+        self.assertIn("codex_turn_id: fake-turn-1", rendered)
+        self.assertIn("telegram_text: Accepted: queued.", rendered)
+        self.assertIn("telegram_text: Started: working on it.", rendered)
+        self.assertIn("telegram_text: Completed.", rendered)
+        self.assertNotIn("Sensitive fake smoke task text", rendered)
+
+    def test_live_smoke_fails_clearly_without_required_live_config(self):
+        stderr = io.StringIO()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with contextlib.redirect_stderr(stderr):
+                status = cli.main(["--live-smoke"])
+
+        self.assertEqual(status, 2)
+        self.assertIn("VERA_TELEGRAM_BOT_TOKEN is required for live runs", stderr.getvalue())
+
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {"VERA_TELEGRAM_BOT_TOKEN": "token-placeholder"}, clear=True):
+            with contextlib.redirect_stderr(stderr):
+                status = cli.main(["--live-smoke"])
+
+        self.assertEqual(status, 2)
+        self.assertIn(
+            "telegram.allowed_chat_ids or telegram.allowed_user_ids is required for live runs",
+            stderr.getvalue(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

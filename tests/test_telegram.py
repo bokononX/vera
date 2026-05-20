@@ -232,6 +232,10 @@ class TelegramLongPollingIntakeTests(unittest.TestCase):
             self.assertEqual(format_telegram_status(TelegramTaskStatus.STARTED), "Started: working on it.")
             self.assertEqual(format_telegram_status(TelegramTaskStatus.COMPLETED), "Completed.")
             self.assertEqual(
+                format_telegram_status(TelegramTaskStatus.FAILED),
+                "Failed: Vera could not complete the task.",
+            )
+            self.assertEqual(
                 format_telegram_status(
                     TelegramTaskStatus.BLOCKED,
                     reason="Need a repo URL before continuing.",
@@ -246,6 +250,11 @@ class TelegramLongPollingIntakeTests(unittest.TestCase):
                 TelegramTaskStatus.BLOCKED,
                 reason="Need a repo URL before continuing.",
             )
+            polling.send_task_status(
+                task,
+                TelegramTaskStatus.FAILED,
+                reason="Codex turn timed out.",
+            )
 
             self.assertEqual(
                 [message["text"] for message in api.sent_messages],
@@ -253,9 +262,10 @@ class TelegramLongPollingIntakeTests(unittest.TestCase):
                     "Started: working on it.",
                     "Completed.",
                     "Blocked: I need your judgment before continuing. Need a repo URL before continuing.",
+                    "Failed: Vera could not complete the task. Codex turn timed out.",
                 ],
             )
-            self.assertEqual(store.task_status(task.task_id), TelegramTaskStatus.BLOCKED.value)
+            self.assertEqual(store.task_status(task.task_id), TelegramTaskStatus.FAILED.value)
 
 
 if __name__ == "__main__":
