@@ -45,6 +45,11 @@ class HarnessConfig:
     telegram_bot_token: Optional[str]
     allowed_chat_ids: Tuple[int, ...]
     allowed_user_ids: Tuple[int, ...]
+    telegram_api_base_url: str
+    telegram_poll_timeout_seconds: int
+    telegram_request_timeout_seconds: int
+    telegram_state_path: Path
+    telegram_unauthorized_response: Optional[str]
     workspace_root: Path
     codex_app_server_command: CommandSpec
     max_turns: int
@@ -67,6 +72,26 @@ class HarnessConfig:
         telegram_bot_token = _optional_text(source.get("VERA_TELEGRAM_BOT_TOKEN"))
         allowed_chat_ids = _parse_int_list(source.get("VERA_ALLOWED_CHAT_IDS"), "VERA_ALLOWED_CHAT_IDS")
         allowed_user_ids = _parse_int_list(source.get("VERA_ALLOWED_USER_IDS"), "VERA_ALLOWED_USER_IDS")
+        telegram_api_base_url = _parse_url_base(
+            source.get("VERA_TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
+            "VERA_TELEGRAM_API_BASE_URL",
+        )
+        telegram_poll_timeout_seconds = _parse_positive_int(
+            source.get("VERA_TELEGRAM_POLL_TIMEOUT_SECONDS"),
+            "VERA_TELEGRAM_POLL_TIMEOUT_SECONDS",
+            30,
+        )
+        telegram_request_timeout_seconds = _parse_positive_int(
+            source.get("VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS"),
+            "VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS",
+            35,
+        )
+        telegram_state_path = Path(
+            source.get("VERA_TELEGRAM_STATE_PATH", "./.vera/telegram_state.json")
+        ).expanduser().resolve()
+        telegram_unauthorized_response = _optional_text(
+            source.get("VERA_TELEGRAM_UNAUTHORIZED_RESPONSE")
+        )
 
         if require_secrets and not telegram_bot_token:
             raise ConfigError("VERA_TELEGRAM_BOT_TOKEN is required for live runs")
@@ -118,6 +143,11 @@ class HarnessConfig:
             telegram_bot_token=telegram_bot_token,
             allowed_chat_ids=allowed_chat_ids,
             allowed_user_ids=allowed_user_ids,
+            telegram_api_base_url=telegram_api_base_url,
+            telegram_poll_timeout_seconds=telegram_poll_timeout_seconds,
+            telegram_request_timeout_seconds=telegram_request_timeout_seconds,
+            telegram_state_path=telegram_state_path,
+            telegram_unauthorized_response=telegram_unauthorized_response,
             workspace_root=workspace_root,
             codex_app_server_command=codex_command,
             max_turns=max_turns,
@@ -163,6 +193,15 @@ def _parse_int_list(value: Optional[str], field_name: str) -> Tuple[int, ...]:
         except ValueError:
             raise ConfigError("{} contains a non-integer value: {!r}".format(field_name, item))
     return tuple(result)
+
+
+def _parse_url_base(value: str, field_name: str) -> str:
+    text = value.strip().rstrip("/")
+    if not text:
+        raise ConfigError("{} must not be empty".format(field_name))
+    if not (text.startswith("https://") or text.startswith("http://")):
+        raise ConfigError("{} must start with http:// or https://".format(field_name))
+    return text
 
 
 def _parse_positive_int(value: Optional[str], field_name: str, default: int) -> int:

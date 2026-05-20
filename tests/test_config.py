@@ -13,6 +13,11 @@ class HarnessConfigTests(unittest.TestCase):
                     "VERA_TELEGRAM_BOT_TOKEN": "token-placeholder",
                     "VERA_ALLOWED_CHAT_IDS": "123, 456",
                     "VERA_ALLOWED_USER_IDS": "789",
+                    "VERA_TELEGRAM_API_BASE_URL": "https://telegram.example.test/",
+                    "VERA_TELEGRAM_POLL_TIMEOUT_SECONDS": "12",
+                    "VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS": "13",
+                    "VERA_TELEGRAM_STATE_PATH": str(Path(temp_dir, "telegram-state.json")),
+                    "VERA_TELEGRAM_UNAUTHORIZED_RESPONSE": "This chat is not authorized.",
                     "VERA_WORKSPACE_ROOT": temp_dir,
                     "VERA_CODEX_APP_SERVER_COMMAND": "codex app-server --port 0",
                     "VERA_MAX_TURNS": "7",
@@ -30,6 +35,11 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_bot_token, "token-placeholder")
         self.assertEqual(config.allowed_chat_ids, (123, 456))
         self.assertEqual(config.allowed_user_ids, (789,))
+        self.assertEqual(config.telegram_api_base_url, "https://telegram.example.test")
+        self.assertEqual(config.telegram_poll_timeout_seconds, 12)
+        self.assertEqual(config.telegram_request_timeout_seconds, 13)
+        self.assertEqual(config.telegram_state_path, Path(temp_dir, "telegram-state.json").resolve())
+        self.assertEqual(config.telegram_unauthorized_response, "This chat is not authorized.")
         self.assertEqual(config.workspace_root, Path(temp_dir).resolve())
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server", "--port", "0"))
         self.assertEqual(config.max_turns, 7)
@@ -48,6 +58,11 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertIsNone(config.telegram_bot_token)
         self.assertEqual(config.allowed_chat_ids, ())
         self.assertEqual(config.allowed_user_ids, ())
+        self.assertEqual(config.telegram_api_base_url, "https://api.telegram.org")
+        self.assertEqual(config.telegram_poll_timeout_seconds, 30)
+        self.assertEqual(config.telegram_request_timeout_seconds, 35)
+        self.assertEqual(config.telegram_state_path.name, "telegram_state.json")
+        self.assertIsNone(config.telegram_unauthorized_response)
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server"))
         self.assertEqual(config.sandbox_mode, "read-only")
         self.assertIsNone(config.codex_approval_decision)
@@ -68,6 +83,9 @@ class HarnessConfigTests(unittest.TestCase):
             {"VERA_ALLOWED_CHAT_IDS": "abc"},
             {"VERA_MAX_TURNS": "0"},
             {"VERA_TURN_TIMEOUT_SECONDS": "-1"},
+            {"VERA_TELEGRAM_API_BASE_URL": "api.telegram.org"},
+            {"VERA_TELEGRAM_POLL_TIMEOUT_SECONDS": "0"},
+            {"VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS": "-1"},
             {"VERA_APPROVAL_POLICY": "sometimes"},
             {"VERA_SANDBOX_MODE": "open"},
             {"VERA_CODEX_APPROVAL_DECISION": "approve"},

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 from .codex import CodexInvocation, CodexRuntimePlanner
 from .config import HarnessConfig
 from .models import HarnessRun, TelegramTask, Workspace
 from .prompt import PromptPolicy, build_prompt_policy
-from .telegram import TelegramIntake
+from .telegram import TelegramIntake, TelegramIntakeOutcome, TelegramLongPollingIntake, TelegramUpdateStatus
 from .workspace import WorkspaceManager
 
 
@@ -20,6 +20,12 @@ class DryRunResult:
     harness_run: HarnessRun
     policy: PromptPolicy
     invocation: CodexInvocation
+
+
+@dataclass(frozen=True)
+class PollOnceResult:
+    outcomes: Tuple[TelegramIntakeOutcome, ...]
+    queued_tasks: Tuple[TelegramTask, ...]
 
 
 class VeraHarness:
@@ -65,6 +71,16 @@ class VeraHarness:
             invocation=invocation,
         )
 
+    def poll_telegram_once(self) -> PollOnceResult:
+        """Poll Telegram once and queue accepted tasks for future orchestration."""
+
+        polling_intake = TelegramLongPollingIntake(self._config)
+        outcomes = polling_intake.poll_once()
+        return PollOnceResult(
+            outcomes=outcomes,
+            queued_tasks=polling_intake.queue.queued_tasks(),
+        )
+
 
 def format_dry_run(result: DryRunResult) -> str:
     invocation = result.invocation
@@ -98,5 +114,25 @@ def format_dry_run(result: DryRunResult) -> str:
             "",
             "codex_launch: skipped (dry run)",
             "telegram_network_calls: skipped (dry run)",
+        ]
+    )
+
+
+def format_poll_once(result: PollOnceResult) -> str:
+    counts = {
+        status: sum(1 for outcome in result.outcomes if outcome.status == status)
+        for status in TelegramUpdateStatus
+    }
+    return "\n".join(
+        [
+            "Vera Telegram poll",
+            "updates_seen: {}".format(len(result.outcomes)),
+            "accepted: {}".format(counts[TelegramUpdateStatus.ACCEPTED]),
+            "rejected: {}".format(counts[TelegramUpdateStatus.REJECTED]),
+            "blocked: {}".format(counts[TelegramUpdateStatus.BLOCKED]),
+            "duplicates: {}".format(counts[TelegramUpdateStatus.DUPLICATE]),
+            "ignored: {}".format(counts[TelegramUpdateStatus.IGNORED]),
+            "queued_tasks: {}".format(len(result.queued_tasks)),
+            "codex_launch: skipped (queued only)",
         ]
     )

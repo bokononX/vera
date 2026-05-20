@@ -2,9 +2,9 @@
 
 This repository contains the Python scaffold for the Vera agent harness. It can
 load configuration, synthesize the Herald policy prompt, resolve a per-task
-workspace, print dry-run Codex app-server invocation plans, and drive a Codex
-app-server turn over newline-delimited JSON-RPC through a testable runtime
-adapter.
+workspace, poll Telegram through the Bot API, queue authorized Telegram tasks,
+print dry-run Codex app-server invocation plans, and drive a Codex app-server
+turn over newline-delimited JSON-RPC through a testable runtime adapter.
 
 ## Local Dry Run
 
@@ -28,17 +28,50 @@ The command prints:
 Dry runs default to `./.vera/workspaces` for local task workspaces. That path is
 ignored by git.
 
+## Telegram Polling
+
+Live Telegram intake uses Bot API long polling. It currently queues accepted
+tasks for orchestration and sends Telegram status replies, but it does not
+launch Codex.
+
+```sh
+export VERA_TELEGRAM_BOT_TOKEN="..."
+export VERA_ALLOWED_CHAT_IDS="12345"
+export VERA_ALLOWED_USER_IDS="67890"
+
+PYTHONPATH=src python3 -m vera_harness --poll-once
+```
+
+`--poll-once` performs one `getUpdates` call, suppresses updates already
+recorded in the local state file, converts authorized text messages into
+minimal `TelegramTask` objects, queues them in memory for the current process,
+and sends concise Telegram replies such as `Accepted: queued.` or
+`Blocked: I need your judgment before continuing.`
+
+Unauthorized chats/users are ignored by default. Set
+`VERA_TELEGRAM_UNAUTHORIZED_RESPONSE` to send a short rejection response
+instead.
+
+Telegram offset and task lifecycle state are persisted locally at
+`VERA_TELEGRAM_STATE_PATH`. The state file stores update ids and task metadata
+such as chat id, user id, message id, and lifecycle status. It does not persist
+raw Telegram message text or usernames.
+
 ## Configuration
 
 Configuration is read from environment variables. Dry-run mode does not require
-secrets. Future live Telegram/Codex runtime modes should call the same loader
-with secret validation enabled.
+secrets. Telegram polling validates live Bot API and allow-list settings.
 
 | Variable | Required for dry run | Description |
 | --- | --- | --- |
-| `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required only for future live Telegram intake. |
+| `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required for `--poll-once`. |
 | `VERA_ALLOWED_CHAT_IDS` | No | Comma-separated Telegram chat ids allowed to submit tasks. Empty means unrestricted in dry run. |
 | `VERA_ALLOWED_USER_IDS` | No | Comma-separated Telegram user ids allowed to submit tasks. Empty means unrestricted in dry run. |
+| `VERA_TELEGRAM_API_BASE_URL` | No | Telegram API base URL. Defaults to `https://api.telegram.org`. |
+| `VERA_TELEGRAM_POLL_TIMEOUT_SECONDS` | No | Telegram long-poll timeout. Defaults to `30`. |
+| `VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS` | No | HTTP request timeout for Telegram API calls. Defaults to `35`. |
+| `VERA_TELEGRAM_STATE_PATH` | No | Local JSON file for Telegram update offsets and task lifecycle state. Defaults to `./.vera/telegram_state.json`. |
+| `VERA_TELEGRAM_UNAUTHORIZED_RESPONSE` | No | Optional concise response sent to unauthorized Telegram sources. Empty means ignore unauthorized updates after recording their offset. |
 | `VERA_WORKSPACE_ROOT` | No | Root directory for per-task workspaces. Defaults to `./.vera/workspaces`. |
 | `VERA_CODEX_APP_SERVER_COMMAND` | No | Shell-style command used to launch the Codex app server. Defaults to `codex app-server`. |
 | `VERA_MAX_TURNS` | No | Maximum Codex turns per harness run. Defaults to `20`. |
@@ -71,8 +104,15 @@ Implemented now:
 - configuration parsing and validation;
 - domain models for Telegram tasks, harness runs, workspaces, and Codex turn
   results;
-- module boundaries for config, Telegram intake, workspace management, Codex
-  runtime planning, prompt/policy, and orchestration;
+- module boundaries for config, Telegram intake, Telegram state persistence,
+  workspace management, Codex runtime planning/execution, prompt/policy, and
+  orchestration;
+- Telegram Bot API long polling with injectable transport for tests;
+- authorization by configured chat and/or user ids;
+- duplicate update suppression across restarts through local offset
+  persistence;
+- concise Telegram status replies for accepted, rejected, started, completed,
+  and blocked task states;
 - dry-run CLI output for local validation;
 - Codex app-server launch over stdio JSON-RPC;
 - `initialize`, `thread/start`, and `turn/start` request flow;
@@ -82,5 +122,6 @@ Implemented now:
 
 Not implemented in this ticket:
 
-- live Telegram polling or webhook handling;
-- repository cloning or bootstrap execution.
+- Telegram webhook handling;
+- repository cloning or bootstrap execution;
+- continuous multi-task orchestration beyond the in-memory accepted-task queue.
