@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 
 class ConfigError(ValueError):
     """Raised when harness configuration is invalid."""
+
+
+DEFAULT_TELEGRAM_CONFIG_PATH = "./.vera/telegram_config.json"
 
 
 @dataclass(frozen=True)
@@ -67,34 +71,90 @@ class HarnessConfig:
     repo_bootstrap_command: Optional[CommandSpec] = None
 
     @classmethod
+    def load(
+        cls,
+        env: Optional[Mapping[str, str]] = None,
+        require_secrets: bool = True,
+        telegram_config_path: Optional[str] = None,
+    ) -> "HarnessConfig":
+        source = os.environ if env is None else env
+        path_text = telegram_config_path or _optional_text(source.get("VERA_TELEGRAM_CONFIG_PATH"))
+        explicit_path = path_text is not None
+        config_path = Path(path_text or DEFAULT_TELEGRAM_CONFIG_PATH).expanduser().resolve()
+        telegram_config = _load_telegram_config(config_path, explicit_path)
+        return cls.from_env(
+            source,
+            require_secrets=require_secrets,
+            telegram_config=telegram_config,
+        )
+
+    @classmethod
     def from_env(
         cls,
         env: Optional[Mapping[str, str]] = None,
         require_secrets: bool = True,
+        telegram_config: Optional[Mapping[str, Any]] = None,
     ) -> "HarnessConfig":
         source = os.environ if env is None else env
+        telegram_source = telegram_config or {}
         telegram_bot_token = _optional_text(source.get("VERA_TELEGRAM_BOT_TOKEN"))
-        allowed_chat_ids = _parse_int_list(source.get("VERA_ALLOWED_CHAT_IDS"), "VERA_ALLOWED_CHAT_IDS")
-        allowed_user_ids = _parse_int_list(source.get("VERA_ALLOWED_USER_IDS"), "VERA_ALLOWED_USER_IDS")
+        allowed_chat_ids = _parse_int_list(
+            _setting_value(
+                telegram_source,
+                "allowed_chat_ids",
+                source.get("VERA_ALLOWED_CHAT_IDS"),
+            ),
+            "telegram.allowed_chat_ids",
+        )
+        allowed_user_ids = _parse_int_list(
+            _setting_value(
+                telegram_source,
+                "allowed_user_ids",
+                source.get("VERA_ALLOWED_USER_IDS"),
+            ),
+            "telegram.allowed_user_ids",
+        )
         telegram_api_base_url = _parse_url_base(
-            source.get("VERA_TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
-            "VERA_TELEGRAM_API_BASE_URL",
+            _setting_value(
+                telegram_source,
+                "api_base_url",
+                source.get("VERA_TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
+            ),
+            "telegram.api_base_url",
         )
         telegram_poll_timeout_seconds = _parse_positive_int(
-            source.get("VERA_TELEGRAM_POLL_TIMEOUT_SECONDS"),
-            "VERA_TELEGRAM_POLL_TIMEOUT_SECONDS",
+            _setting_value(
+                telegram_source,
+                "poll_timeout_seconds",
+                source.get("VERA_TELEGRAM_POLL_TIMEOUT_SECONDS"),
+            ),
+            "telegram.poll_timeout_seconds",
             30,
         )
         telegram_request_timeout_seconds = _parse_positive_int(
-            source.get("VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS"),
-            "VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS",
+            _setting_value(
+                telegram_source,
+                "request_timeout_seconds",
+                source.get("VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS"),
+            ),
+            "telegram.request_timeout_seconds",
             35,
         )
-        telegram_state_path = Path(
-            source.get("VERA_TELEGRAM_STATE_PATH", "./.vera/telegram_state.json")
-        ).expanduser().resolve()
-        telegram_unauthorized_response = _optional_text(
-            source.get("VERA_TELEGRAM_UNAUTHORIZED_RESPONSE")
+        telegram_state_path = _parse_path(
+            _setting_value(
+                telegram_source,
+                "state_path",
+                source.get("VERA_TELEGRAM_STATE_PATH", "./.vera/telegram_state.json"),
+            ),
+            "telegram.state_path",
+        )
+        telegram_unauthorized_response = _parse_optional_string(
+            _setting_value(
+                telegram_source,
+                "unauthorized_response",
+                source.get("VERA_TELEGRAM_UNAUTHORIZED_RESPONSE"),
+            ),
+            "telegram.unauthorized_response",
         )
         run_state_path = Path(
             source.get("VERA_RUN_STATE_PATH", "./.vera/run_state.json")
@@ -104,7 +164,7 @@ class HarnessConfig:
             raise ConfigError("VERA_TELEGRAM_BOT_TOKEN is required for live runs")
         if require_secrets and not allowed_chat_ids and not allowed_user_ids:
             raise ConfigError(
-                "VERA_ALLOWED_CHAT_IDS or VERA_ALLOWED_USER_IDS is required for live runs"
+                "telegram.allowed_chat_ids or telegram.allowed_user_ids is required for live runs"
             )
 
         workspace_root = Path(
@@ -208,7 +268,77 @@ def _optional_command(value: Optional[str], field_name: str) -> Optional[Command
     return CommandSpec.parse(text, field_name)
 
 
-def _parse_int_list(value: Optional[str], field_name: str) -> Tuple[int, ...]:
+def _parse_optional_string(value: Any, field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError("{} must be a string or null".format(field_name))
+    return _optional_text(value)
+
+
+def _load_telegram_config(config_path: Path, explicit_path: bool) -> Mapping[str, Any]:
+    if not config_path.exists():
+        if explicit_path:
+            raise ConfigError("Telegram config file does not exist: {}".format(config_path))
+        return {}
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError("Telegram config file cannot be read: {}".format(exc))
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ConfigError("Telegram config file is not valid JSON: {}".format(exc))
+    if not isinstance(loaded, dict):
+        raise ConfigError("Telegram config file must contain a JSON object")
+    if "telegram" not in loaded:
+        raise ConfigError("Telegram config file must contain a 'telegram' object")
+    telegram_config = loaded["telegram"]
+    if not isinstance(telegram_config, dict):
+        raise ConfigError("telegram must be a JSON object")
+    forbidden = {"bot_token", "telegram_bot_token", "VERA_TELEGRAM_BOT_TOKEN"}
+    present_forbidden = sorted(forbidden.intersection(telegram_config.keys()))
+    if present_forbidden:
+        raise ConfigError(
+            "Telegram config must not contain secret fields: {}".format(
+                ", ".join(present_forbidden)
+            )
+        )
+    allowed = {
+        "allowed_chat_ids",
+        "allowed_user_ids",
+        "api_base_url",
+        "poll_timeout_seconds",
+        "request_timeout_seconds",
+        "state_path",
+        "unauthorized_response",
+    }
+    unknown = sorted(set(telegram_config.keys()) - allowed)
+    if unknown:
+        raise ConfigError("Telegram config contains unknown fields: {}".format(", ".join(unknown)))
+    return telegram_config
+
+
+def _setting_value(
+    config: Mapping[str, Any],
+    key: str,
+    env_value: Optional[str],
+) -> Any:
+    if key in config:
+        return config[key]
+    return env_value
+
+
+def _parse_int_list(value: Any, field_name: str) -> Tuple[int, ...]:
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in value:
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise ConfigError("{} must contain only integers".format(field_name))
+            result.append(item)
+        return tuple(result)
+    if value is not None and not isinstance(value, str):
+        raise ConfigError("{} must be an array of integers or a comma-separated string".format(field_name))
     text = _optional_text(value)
     if text is None:
         return ()
@@ -224,7 +354,9 @@ def _parse_int_list(value: Optional[str], field_name: str) -> Tuple[int, ...]:
     return tuple(result)
 
 
-def _parse_url_base(value: str, field_name: str) -> str:
+def _parse_url_base(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError("{} must be a string".format(field_name))
     text = value.strip().rstrip("/")
     if not text:
         raise ConfigError("{} must not be empty".format(field_name))
@@ -233,7 +365,22 @@ def _parse_url_base(value: str, field_name: str) -> str:
     return text
 
 
-def _parse_positive_int(value: Optional[str], field_name: str, default: int) -> int:
+def _parse_path(value: Any, field_name: str) -> Path:
+    if not isinstance(value, str):
+        raise ConfigError("{} must be a string".format(field_name))
+    return Path(value).expanduser().resolve()
+
+
+def _parse_positive_int(value: Any, field_name: str, default: int) -> int:
+    if isinstance(value, bool):
+        raise ConfigError("{} must be an integer".format(field_name))
+    if isinstance(value, int):
+        parsed = value
+        if parsed <= 0:
+            raise ConfigError("{} must be greater than zero".format(field_name))
+        return parsed
+    if value is not None and not isinstance(value, str):
+        raise ConfigError("{} must be an integer".format(field_name))
     text = _optional_text(value)
     if text is None:
         return default

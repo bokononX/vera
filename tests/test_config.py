@@ -90,6 +90,88 @@ class HarnessConfigTests(unittest.TestCase):
                 require_secrets=True,
             )
 
+    def test_load_reads_telegram_settings_from_config_and_token_from_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            state_path = Path(temp_dir, "state.json")
+            config_path.write_text(
+                """
+{
+  "telegram": {
+    "allowed_chat_ids": [123, 456],
+    "allowed_user_ids": [789],
+    "api_base_url": "https://telegram.example.test/",
+    "poll_timeout_seconds": 12,
+    "request_timeout_seconds": 13,
+    "state_path": "%s",
+    "unauthorized_response": "This chat is not authorized."
+  }
+}
+""".strip()
+                % state_path,
+                encoding="utf-8",
+            )
+
+            config = HarnessConfig.load(
+                {
+                    "VERA_TELEGRAM_BOT_TOKEN": "token-placeholder",
+                    "VERA_ALLOWED_CHAT_IDS": "999",
+                    "VERA_WORKSPACE_ROOT": temp_dir,
+                },
+                telegram_config_path=str(config_path),
+                require_secrets=True,
+            )
+
+        self.assertEqual(config.telegram_bot_token, "token-placeholder")
+        self.assertEqual(config.allowed_chat_ids, (123, 456))
+        self.assertEqual(config.allowed_user_ids, (789,))
+        self.assertEqual(config.telegram_api_base_url, "https://telegram.example.test")
+        self.assertEqual(config.telegram_poll_timeout_seconds, 12)
+        self.assertEqual(config.telegram_request_timeout_seconds, 13)
+        self.assertEqual(config.telegram_state_path, state_path.resolve())
+        self.assertEqual(config.telegram_unauthorized_response, "This chat is not authorized.")
+
+    def test_explicit_missing_or_malformed_telegram_config_fails_clearly(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = Path(temp_dir, "missing.json")
+            with self.assertRaisesRegex(ConfigError, "does not exist"):
+                HarnessConfig.load({}, telegram_config_path=str(missing_path), require_secrets=False)
+
+            bad_json_path = Path(temp_dir, "bad.json")
+            bad_json_path.write_text("{not-json", encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "not valid JSON"):
+                HarnessConfig.load({}, telegram_config_path=str(bad_json_path), require_secrets=False)
+
+    def test_telegram_config_rejects_secret_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            config_path.write_text(
+                """
+{
+  "telegram": {
+    "bot_token": "not-allowed-in-config",
+    "allowed_chat_ids": [123]
+  }
+}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "must not contain secret fields"):
+                HarnessConfig.load({}, telegram_config_path=str(config_path), require_secrets=False)
+
+    def test_env_allow_list_still_works_when_no_default_config_exists(self):
+        config = HarnessConfig.load(
+            {
+                "VERA_TELEGRAM_BOT_TOKEN": "token-placeholder",
+                "VERA_ALLOWED_CHAT_IDS": "123",
+            },
+            require_secrets=True,
+        )
+
+        self.assertEqual(config.telegram_bot_token, "token-placeholder")
+        self.assertEqual(config.allowed_chat_ids, (123,))
+
     def test_invalid_values_raise_config_error(self):
         invalid_cases = [
             {"VERA_ALLOWED_CHAT_IDS": "abc"},

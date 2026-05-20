@@ -40,6 +40,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override VERA_WORKSPACE_ROOT for this invocation.",
     )
     parser.add_argument(
+        "--telegram-config",
+        default=None,
+        help="Path to Telegram non-secret JSON config. Defaults to ./.vera/telegram_config.json.",
+    )
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Validate configuration and print a non-secret summary without network calls.",
+    )
+    parser.add_argument(
         "--no-create-workspace",
         action="store_true",
         help="Resolve the dry-run workspace path without creating directories.",
@@ -51,18 +61,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.dry_run and args.poll_once:
-        parser.error("choose only one mode: --dry-run or --poll-once")
-    if not args.dry_run and not args.poll_once:
-        parser.error("choose a mode: --dry-run or --poll-once")
+    selected_modes = [args.dry_run, args.poll_once, args.check_config]
+    if sum(1 for selected in selected_modes if selected) > 1:
+        parser.error("choose only one mode: --dry-run, --poll-once, or --check-config")
+    if not any(selected_modes):
+        parser.error("choose a mode: --dry-run, --poll-once, or --check-config")
 
     try:
-        config = HarnessConfig.from_env(require_secrets=args.poll_once)
+        config = HarnessConfig.load(
+            require_secrets=args.poll_once or args.check_config,
+            telegram_config_path=args.telegram_config,
+        )
         if args.workspace_root is not None:
             config = replace(
                 config,
                 workspace_root=Path(args.workspace_root).expanduser().resolve(),
             )
+        if args.check_config:
+            print(_format_config_check(config))
+            return 0
         harness = VeraHarness(config)
         if args.poll_once:
             print(format_poll_once(harness.poll_telegram_once()))
@@ -82,6 +99,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print(format_dry_run(result))
     return 0
+
+
+def _format_config_check(config: HarnessConfig) -> str:
+    unauthorized = config.telegram_unauthorized_response
+    if unauthorized is None:
+        unauthorized = "<disabled>"
+    return "\n".join(
+        [
+            "Vera configuration OK",
+            "telegram_bot_token: <secret-present>",
+            "allowed_chat_ids: {}".format(",".join(str(item) for item in config.allowed_chat_ids)),
+            "allowed_user_ids: {}".format(",".join(str(item) for item in config.allowed_user_ids)),
+            "telegram_api_base_url: {}".format(config.telegram_api_base_url),
+            "telegram_poll_timeout_seconds: {}".format(config.telegram_poll_timeout_seconds),
+            "telegram_request_timeout_seconds: {}".format(config.telegram_request_timeout_seconds),
+            "telegram_state_path: {}".format(config.telegram_state_path),
+            "telegram_unauthorized_response: {}".format(unauthorized),
+            "workspace_root: {}".format(config.workspace_root),
+        ]
+    )
 
 
 if __name__ == "__main__":
