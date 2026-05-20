@@ -9,3 +9,6 @@
   behavior.
 - 2026-05-20: Updated the Vera harness concept with Telegram long polling,
   offset persistence, concise status replies, and minimal task-state storage.
+- 2026-05-20: Updated the Vera harness concept with isolated workspace
+  lifecycle policy, root escape protection, bounded bootstrap diagnostics, and
+  cleanup constraints.

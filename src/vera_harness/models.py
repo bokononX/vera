@@ -23,6 +23,24 @@ class CodexTurnStatus(str, Enum):
     TIMED_OUT = "timed_out"
 
 
+class WorkspaceReusePolicy(str, Enum):
+    """How the harness should treat an existing task workspace."""
+
+    REUSE = "reuse"
+    FRESH = "fresh"
+    REQUIRE_EXISTING = "require_existing"
+
+
+class WorkspaceBootstrapStatus(str, Enum):
+    """Outcome for workspace clone/bootstrap commands."""
+
+    NOT_CONFIGURED = "not_configured"
+    SKIPPED = "skipped"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+
+
 @dataclass(frozen=True)
 class TelegramTask:
     """A minimal task derived from a Telegram message."""
@@ -79,6 +97,14 @@ class Workspace:
     root: Path
     path: Path
     created: bool = False
+    reused: bool = False
+    reuse_policy: WorkspaceReusePolicy = WorkspaceReusePolicy.REUSE
+    metadata_path: Optional[Path] = None
+    bootstrap_status: WorkspaceBootstrapStatus = WorkspaceBootstrapStatus.SKIPPED
+    bootstrap_stdout: str = ""
+    bootstrap_stderr: str = ""
+    bootstrap_returncode: Optional[int] = None
+    bootstrap_error: Optional[str] = None
     repo_clone_command: Optional[str] = None
     repo_bootstrap_command: Optional[str] = None
 

@@ -25,8 +25,10 @@ The command prints:
 - the planned Codex app-server launch settings;
 - confirmation that Telegram and Codex network/runtime calls were skipped.
 
-Dry runs default to `./.vera/workspaces` for local task workspaces. That path is
-ignored by git.
+Dry runs default to `./.vera/workspaces` for local task workspaces. Workspace
+paths are derived from stable Telegram task ids, sanitized to a single safe path
+segment, and validated after resolution so symlinks cannot move Codex outside
+the configured workspace root. That path is ignored by git.
 
 ## Telegram Polling
 
@@ -73,6 +75,8 @@ secrets. Telegram polling validates live Bot API and allow-list settings.
 | `VERA_TELEGRAM_STATE_PATH` | No | Local JSON file for Telegram update offsets and task lifecycle state. Defaults to `./.vera/telegram_state.json`. |
 | `VERA_TELEGRAM_UNAUTHORIZED_RESPONSE` | No | Optional concise response sent to unauthorized Telegram sources. Empty means ignore unauthorized updates after recording their offset. |
 | `VERA_WORKSPACE_ROOT` | No | Root directory for per-task workspaces. Defaults to `./.vera/workspaces`. |
+| `VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS` | No | Timeout for each configured workspace clone/bootstrap command. Defaults to `300`. |
+| `VERA_WORKSPACE_RETENTION_POLICY` | No | Retention policy recorded in workspace metadata: `retain`, `cleanup_on_success`, or `cleanup_on_completion`. Defaults to `retain`. |
 | `VERA_CODEX_APP_SERVER_COMMAND` | No | Shell-style command used to launch the Codex app server. Defaults to `codex app-server`. |
 | `VERA_MAX_TURNS` | No | Maximum Codex turns per harness run. Defaults to `20`. |
 | `VERA_TURN_TIMEOUT_SECONDS` | No | Timeout for one Codex turn. Defaults to `300`. |
@@ -81,8 +85,8 @@ secrets. Telegram polling validates live Bot API and allow-list settings.
 | `VERA_SANDBOX_MODE` | No | Planned Codex sandbox mode: `read-only`, `workspace-write`, or `danger-full-access`. Defaults to `read-only`. |
 | `VERA_CODEX_APPROVAL_DECISION` | No | Optional unattended response for command/file approval prompts: `accept`, `acceptForSession`, `decline`, or `cancel`. Empty by default, which returns an explicit blocked outcome. |
 | `VERA_CODEX_AUTO_INPUT_RESPONSE` | No | Optional unattended text answer for app-server `request_user_input` prompts. Empty by default, which returns an explicit blocked outcome. |
-| `VERA_REPO_CLONE_COMMAND` | No | Optional shell-style command for future workspace repository cloning. Not executed in dry run. |
-| `VERA_REPO_BOOTSTRAP_COMMAND` | No | Optional shell-style command for future workspace bootstrap. Not executed in dry run. |
+| `VERA_REPO_CLONE_COMMAND` | No | Optional shell-style command executed in a newly prepared workspace before the bootstrap command. Not executed in dry run. |
+| `VERA_REPO_BOOTSTRAP_COMMAND` | No | Optional shell-style command executed in a newly prepared workspace after the clone command. Not executed in dry run. |
 
 Do not commit actual secret values. Documentation should name variables only.
 
@@ -102,8 +106,8 @@ live Telegram or Codex access.
 Implemented now:
 
 - configuration parsing and validation;
-- domain models for Telegram tasks, harness runs, workspaces, and Codex turn
-  results;
+- domain models for Telegram tasks, harness runs, workspaces, workspace reuse
+  policy, bootstrap diagnostics, and Codex turn results;
 - module boundaries for config, Telegram intake, Telegram state persistence,
   workspace management, Codex runtime planning/execution, prompt/policy, and
   orchestration;
@@ -113,6 +117,9 @@ Implemented now:
   persistence;
 - concise Telegram status replies for accepted, rejected, started, completed,
   and blocked task states;
+- deterministic isolated workspace lifecycle with explicit reuse/fresh/existing
+  policies, metadata recording, root escape protection, bounded bootstrap
+  command execution, and guarded cleanup hooks;
 - dry-run CLI output for local validation;
 - Codex app-server launch over stdio JSON-RPC;
 - `initialize`, `thread/start`, and `turn/start` request flow;
@@ -123,5 +130,4 @@ Implemented now:
 Not implemented in this ticket:
 
 - Telegram webhook handling;
-- repository cloning or bootstrap execution;
 - continuous multi-task orchestration beyond the in-memory accepted-task queue.

@@ -5,7 +5,12 @@ import time
 import unittest
 from pathlib import Path
 
-from vera_harness.codex import CodexAppServerRuntime, CodexRunStatus, CodexRuntimePlanner
+from vera_harness.codex import (
+    CodexAppServerError,
+    CodexAppServerRuntime,
+    CodexRunStatus,
+    CodexRuntimePlanner,
+)
 from vera_harness.config import HarnessConfig
 from vera_harness.models import Workspace
 
@@ -108,6 +113,22 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
             self.assertEqual(result.status, CodexRunStatus.FAILED)
             self.assertIn("failed to launch Codex app-server", result.error)
 
+    def test_planner_rejects_workspace_outside_configured_root(self):
+        with tempfile.TemporaryDirectory() as root_dir, tempfile.TemporaryDirectory() as outside_dir:
+            config = _config(root_dir)
+            workspace = Workspace(
+                workspace_id="escape",
+                task_id="escape",
+                root=Path(root_dir),
+                path=Path(outside_dir),
+                created=True,
+            )
+
+            with self.assertRaises(CodexAppServerError) as raised:
+                CodexRuntimePlanner(config).plan(workspace, "Do work.")
+
+            self.assertIn("workspace cwd escapes configured root", str(raised.exception))
+
     def test_run_turn_completes_and_sends_configured_json_rpc_requests(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -124,7 +145,7 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
             self.assertTrue(factory.processes[0].terminated)
             sent = _sent_messages(factory.processes[0])
             self.assertEqual([message["method"] for message in sent[:3]], ["initialize", "thread/start", "turn/start"])
-            self.assertEqual(sent[1]["params"]["cwd"], str(workspace))
+            self.assertEqual(sent[1]["params"]["cwd"], str(workspace.resolve()))
             self.assertEqual(sent[1]["params"]["approvalPolicy"], "on-request")
             self.assertEqual(sent[1]["params"]["sandbox"], "read-only")
             self.assertEqual(sent[2]["params"]["input"], [{"type": "text", "text": "Ship the runtime adapter."}])

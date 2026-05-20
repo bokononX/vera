@@ -55,6 +55,8 @@ class HarnessConfig:
     max_turns: int
     turn_timeout_seconds: int
     run_timeout_seconds: int
+    workspace_bootstrap_timeout_seconds: int
+    workspace_retention_policy: str
     approval_policy: str
     sandbox_mode: str
     codex_approval_decision: Optional[str] = None
@@ -118,6 +120,19 @@ class HarnessConfig:
             "VERA_RUN_TIMEOUT_SECONDS",
             1800,
         )
+        workspace_bootstrap_timeout_seconds = _parse_positive_int(
+            source.get("VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS"),
+            "VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS",
+            300,
+        )
+        workspace_retention_policy = source.get(
+            "VERA_WORKSPACE_RETENTION_POLICY",
+            "retain",
+        ).strip()
+        if workspace_retention_policy not in {"retain", "cleanup_on_success", "cleanup_on_completion"}:
+            raise ConfigError(
+                "VERA_WORKSPACE_RETENTION_POLICY must be one of: cleanup_on_completion, cleanup_on_success, retain"
+            )
         approval_policy = source.get("VERA_APPROVAL_POLICY", "on-request").strip()
         if approval_policy not in {"untrusted", "on-request", "on-failure", "never"}:
             raise ConfigError(
@@ -153,6 +168,8 @@ class HarnessConfig:
             max_turns=max_turns,
             turn_timeout_seconds=turn_timeout_seconds,
             run_timeout_seconds=run_timeout_seconds,
+            workspace_bootstrap_timeout_seconds=workspace_bootstrap_timeout_seconds,
+            workspace_retention_policy=workspace_retention_policy,
             approval_policy=approval_policy,
             sandbox_mode=sandbox_mode,
             codex_approval_decision=codex_approval_decision,
