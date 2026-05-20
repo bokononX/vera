@@ -42,6 +42,10 @@ runtime execution explicit:
   loop, sends started and terminal Telegram status replies, and emits
   audit-suitable logs with task ids, Telegram ids, workspace paths, Codex
   session/turn ids when available, and final outcomes.
+- **Console observability:** projects run state, structured events, focus
+  selection, last-turn summaries, current plan, redacted log stream, and budget
+  telemetry into a shared state provider used by both terminal and local web
+  consoles.
 - **Smoke modes:** provides a no-secret fake Telegram-to-Codex path for local
   validation and a one-cycle live smoke path for configured Telegram bot plus
   local Codex app-server environments.
@@ -74,6 +78,12 @@ runtime execution explicit:
   exposing more context than the chat already supplied.
 - Operational logs should preserve enough IDs to debug and later audit a run
   while avoiding raw Telegram message text and unnecessary user context.
+- Console events should use a small structured schema rather than ad hoc log
+  parsing, and should redact secrets plus raw private source-channel bodies by
+  default.
+- Budget telemetry should display available rate-limit, usage, and threshold
+  data when configured while clearly distinguishing unknown and unavailable
+  states when credentials or snapshots are absent.
 - Orchestration run state should record task ids, run ids, workspace paths,
   turn counts, status, and compact diagnostics, but not raw chat history or
   broader user context.

@@ -46,6 +46,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Poll Telegram once and run accepted tasks through the configured local Codex app-server.",
     )
     parser.add_argument(
+        "--console-tui",
+        action="store_true",
+        help="Launch the local Vera terminal console.",
+    )
+    parser.add_argument(
+        "--console-gui",
+        action="store_true",
+        help="Launch the local Vera web console.",
+    )
+    parser.add_argument(
+        "--console-fake-state",
+        action="store_true",
+        help="Use deterministic fake console state instead of local harness state.",
+    )
+    parser.add_argument(
+        "--console-smoke",
+        action="store_true",
+        help="Run one non-interactive console smoke check and exit.",
+    )
+    parser.add_argument(
+        "--console-focus",
+        default=None,
+        help="Initial console focus by agent id or task id.",
+    )
+    parser.add_argument(
+        "--console-filter",
+        default=None,
+        help="Initial console event filter text.",
+    )
+    parser.add_argument(
+        "--console-host",
+        default="127.0.0.1",
+        help="Host for --console-gui. Defaults to 127.0.0.1.",
+    )
+    parser.add_argument(
+        "--console-port",
+        type=int,
+        default=8765,
+        help="Port for --console-gui. Use 0 to choose a free port.",
+    )
+    parser.add_argument(
         "--message",
         default="Draft a concise project status update.",
         help="Telegram message text to turn into a dry-run task.",
@@ -101,19 +142,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.monitor,
         args.fake_smoke,
         args.live_smoke,
+        args.console_tui,
+        args.console_gui,
     ]
     if sum(1 for selected in selected_modes if selected) > 1:
         parser.error(
-            "choose only one mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, or --check-config"
+            "choose only one mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, or --check-config"
         )
     if not any(selected_modes):
         parser.error(
-            "choose a mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, or --check-config"
+            "choose a mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, or --check-config"
         )
     if args.max_poll_cycles is not None and args.max_poll_cycles <= 0:
         parser.error("--max-poll-cycles must be greater than zero")
     if args.poll_interval_seconds < 0:
         parser.error("--poll-interval-seconds must be zero or greater")
+    if args.console_port < 0:
+        parser.error("--console-port must be zero or greater")
 
     try:
         config = HarnessConfig.load(
@@ -128,6 +173,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.check_config:
             print(_format_config_check(config))
             return 0
+        if args.console_tui:
+            return _run_console_tui(config, args)
+        if args.console_gui:
+            return _run_console_gui(config, args)
         harness = VeraHarness(config)
         if args.poll_once:
             print(format_poll_once(harness.poll_telegram_once()))
@@ -190,9 +239,19 @@ def _format_config_check(config: HarnessConfig) -> str:
             "telegram_request_timeout_seconds: {}".format(config.telegram_request_timeout_seconds),
             "telegram_state_path: {}".format(config.telegram_state_path),
             "telegram_unauthorized_response: {}".format(unauthorized),
+            "event_log_path: {}".format(config.event_log_path),
+            "budget_snapshot_path: {}".format(config.budget_snapshot_path or "<not configured>"),
+            "monthly_budget_usd: {}".format(_display_optional_config(config.monthly_budget_usd)),
+            "project_budget_usd: {}".format(_display_optional_config(config.project_budget_usd)),
             "workspace_root: {}".format(config.workspace_root),
         ]
     )
+
+
+def _display_optional_config(value: object) -> str:
+    if value is None:
+        return "<not configured>"
+    return str(value)
 
 
 def _run_monitor(
@@ -201,15 +260,68 @@ def _run_monitor(
     poll_interval_seconds: float,
     title: str = "Vera Telegram-to-Codex loop",
 ) -> int:
-    harness = VeraHarness(config)
+    event_log = _console_event_log(config)
+    harness = VeraHarness(config, on_event=event_log.append_task_event)
     cycles = 0
     while True:
         result = harness.run_telegram_poll_once()
+        for delivery in result.status_deliveries:
+            event_log.append_source_event(
+                source="telegram",
+                event_type="telegram_status",
+                summary=delivery.text,
+                task_id=delivery.task_id,
+                run_id=None,
+                details={
+                    "chat_id": delivery.chat_id,
+                    "message_id": delivery.message_id,
+                    "update_id": delivery.update_id,
+                    "status": delivery.status.value,
+                },
+            )
         print(format_telegram_loop(result, title=title))
         cycles += 1
         if max_poll_cycles is not None and cycles >= max_poll_cycles:
             return 0
         time.sleep(poll_interval_seconds)
+
+
+def _run_console_tui(config: HarnessConfig, args: argparse.Namespace) -> int:
+    from .console_tui import run_tui
+
+    return run_tui(
+        _console_provider(config, args),
+        focused_agent_id=args.console_focus,
+        event_filter=args.console_filter,
+        smoke=args.console_smoke,
+    )
+
+
+def _run_console_gui(config: HarnessConfig, args: argparse.Namespace) -> int:
+    from .console_gui import run_gui
+
+    return run_gui(
+        _console_provider(config, args),
+        host=args.console_host,
+        port=args.console_port,
+        smoke=args.console_smoke,
+    )
+
+
+def _console_provider(config: HarnessConfig, args: argparse.Namespace):
+    if args.console_fake_state:
+        from .observability import fake_observability_provider
+
+        return fake_observability_provider()
+    from .observability import JsonObservabilityProvider
+
+    return JsonObservabilityProvider.from_config(config)
+
+
+def _console_event_log(config: HarnessConfig):
+    from .observability import JsonConsoleEventLog
+
+    return JsonConsoleEventLog(config.event_log_path)
 
 
 def _run_fake_smoke(config: HarnessConfig, args: argparse.Namespace) -> int:
