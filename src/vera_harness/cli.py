@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
+import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
+from .codex import CodexAppServerError
 from .config import ConfigError, HarnessConfig
-from .orchestrator import VeraHarness, format_dry_run, format_poll_once
-from .telegram import TelegramApiError
+from .orchestrator import FakeCodexRuntime, VeraHarness, format_dry_run, format_poll_once, format_telegram_loop
+from .state import RunStateError
+from .telegram import TelegramApiError, TelegramLongPollingIntake, TelegramUpdateStore
+from .workspace import WorkspaceError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,6 +31,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Long-poll Telegram once, queue accepted tasks, and exit without launching Codex.",
     )
     parser.add_argument(
+        "--monitor",
+        action="store_true",
+        help="Continuously poll Telegram, run accepted tasks through Codex, and send status replies.",
+    )
+    parser.add_argument(
+        "--fake-smoke",
+        action="store_true",
+        help="Run a fake Telegram update through workspace, policy, fake Codex runtime, and status replies.",
+    )
+    parser.add_argument(
+        "--live-smoke",
+        action="store_true",
+        help="Poll Telegram once and run accepted tasks through the configured local Codex app-server.",
+    )
+    parser.add_argument(
         "--message",
         default="Draft a concise project status update.",
         help="Telegram message text to turn into a dry-run task.",
@@ -33,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chat-id", type=int, default=0, help="Telegram chat id.")
     parser.add_argument("--user-id", type=int, default=0, help="Telegram user id.")
     parser.add_argument("--message-id", type=int, default=1, help="Telegram message id.")
+    parser.add_argument("--update-id", type=int, default=9001, help="Telegram update id for fake smoke mode.")
     parser.add_argument("--username", default=None, help="Optional Telegram username.")
     parser.add_argument(
         "--workspace-root",
@@ -54,6 +75,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resolve the dry-run workspace path without creating directories.",
     )
+    parser.add_argument(
+        "--max-poll-cycles",
+        type=int,
+        default=None,
+        help="Stop --monitor after this many polling cycles. Defaults to unlimited.",
+    )
+    parser.add_argument(
+        "--poll-interval-seconds",
+        type=float,
+        default=2.0,
+        help="Sleep between --monitor polling cycles. Defaults to 2 seconds.",
+    )
     return parser
 
 
@@ -61,15 +94,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    selected_modes = [args.dry_run, args.poll_once, args.check_config]
+    selected_modes = [
+        args.dry_run,
+        args.poll_once,
+        args.check_config,
+        args.monitor,
+        args.fake_smoke,
+        args.live_smoke,
+    ]
     if sum(1 for selected in selected_modes if selected) > 1:
-        parser.error("choose only one mode: --dry-run, --poll-once, or --check-config")
+        parser.error(
+            "choose only one mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, or --check-config"
+        )
     if not any(selected_modes):
-        parser.error("choose a mode: --dry-run, --poll-once, or --check-config")
+        parser.error(
+            "choose a mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, or --check-config"
+        )
+    if args.max_poll_cycles is not None and args.max_poll_cycles <= 0:
+        parser.error("--max-poll-cycles must be greater than zero")
+    if args.poll_interval_seconds < 0:
+        parser.error("--poll-interval-seconds must be zero or greater")
 
     try:
         config = HarnessConfig.load(
-            require_secrets=args.poll_once or args.check_config,
+            require_secrets=args.poll_once or args.check_config or args.monitor or args.live_smoke,
             telegram_config_path=args.telegram_config,
         )
         if args.workspace_root is not None:
@@ -84,6 +132,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.poll_once:
             print(format_poll_once(harness.poll_telegram_once()))
             return 0
+        if args.monitor:
+            return _run_monitor(
+                config,
+                max_poll_cycles=args.max_poll_cycles,
+                poll_interval_seconds=args.poll_interval_seconds,
+            )
+        if args.live_smoke:
+            return _run_monitor(
+                config,
+                max_poll_cycles=args.max_poll_cycles or 1,
+                poll_interval_seconds=args.poll_interval_seconds,
+                title="Vera Telegram-to-Codex live smoke",
+            )
+        if args.fake_smoke:
+            return _run_fake_smoke(config, args)
 
         result = harness.dry_run_task(
             text=args.message,
@@ -93,9 +156,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             username=args.username,
             create_workspace=not args.no_create_workspace,
         )
-    except (ConfigError, PermissionError, TelegramApiError, ValueError) as exc:
+    except (
+        CodexAppServerError,
+        ConfigError,
+        PermissionError,
+        RunStateError,
+        TelegramApiError,
+        ValueError,
+        WorkspaceError,
+    ) as exc:
         print("vera-harness: {}".format(exc), file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("vera-harness: stopped by interrupt", file=sys.stderr)
+        return 130
 
     print(format_dry_run(result))
     return 0
@@ -119,6 +193,112 @@ def _format_config_check(config: HarnessConfig) -> str:
             "workspace_root: {}".format(config.workspace_root),
         ]
     )
+
+
+def _run_monitor(
+    config: HarnessConfig,
+    max_poll_cycles: Optional[int],
+    poll_interval_seconds: float,
+    title: str = "Vera Telegram-to-Codex loop",
+) -> int:
+    harness = VeraHarness(config)
+    cycles = 0
+    while True:
+        result = harness.run_telegram_poll_once()
+        print(format_telegram_loop(result, title=title))
+        cycles += 1
+        if max_poll_cycles is not None and cycles >= max_poll_cycles:
+            return 0
+        time.sleep(poll_interval_seconds)
+
+
+def _run_fake_smoke(config: HarnessConfig, args: argparse.Namespace) -> int:
+    update = _fake_update(
+        update_id=args.update_id,
+        chat_id=args.chat_id,
+        user_id=args.user_id,
+        message_id=args.message_id,
+        text=args.message,
+        username=args.username,
+    )
+    fake_api = _FakeTelegramApi((update,))
+    with tempfile.TemporaryDirectory(prefix="vera-fake-smoke-") as temp_dir:
+        smoke_config = replace(
+            config,
+            telegram_bot_token="fake-token",
+            allowed_chat_ids=(args.chat_id,),
+            allowed_user_ids=(args.user_id,),
+            telegram_state_path=Path(temp_dir, "telegram-state.json").resolve(),
+            run_state_path=Path(temp_dir, "run-state.json").resolve(),
+        )
+        intake = TelegramLongPollingIntake(
+            smoke_config,
+            api=fake_api,
+            store=TelegramUpdateStore(smoke_config.telegram_state_path),
+        )
+        harness = VeraHarness(smoke_config, runtime=FakeCodexRuntime())
+        result = harness.run_telegram_poll_once(
+            polling_intake=intake,
+            runtime=FakeCodexRuntime(),
+            dry_run=True,
+            run_bootstrap=False,
+        )
+    print(format_telegram_loop(result, title="Vera Telegram-to-Codex fake smoke"))
+    return 0
+
+
+class _FakeTelegramApi:
+    def __init__(self, updates: Tuple[Mapping[str, Any], ...]) -> None:
+        self._updates = updates
+        self.sent_messages: list[Mapping[str, object]] = []
+
+    def get_updates(self, offset: Optional[int], timeout: int) -> Tuple[Mapping[str, Any], ...]:
+        return tuple(
+            update
+            for update in self._updates
+            if offset is None or _update_id(update) >= offset
+        )
+
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to_message_id: Optional[int] = None,
+    ) -> Mapping[str, object]:
+        message = {
+            "chat_id": chat_id,
+            "text": text,
+            "reply_to_message_id": reply_to_message_id,
+        }
+        self.sent_messages.append(message)
+        return {"message_id": len(self.sent_messages)}
+
+
+def _fake_update(
+    update_id: int,
+    chat_id: int,
+    user_id: int,
+    message_id: int,
+    text: str,
+    username: Optional[str],
+) -> Mapping[str, object]:
+    sender: dict[str, object] = {"id": user_id}
+    if username is not None:
+        sender["username"] = username
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": message_id,
+            "chat": {"id": chat_id},
+            "from": sender,
+            "text": text,
+        },
+    }
+
+
+def _update_id(update: Mapping[str, Any]) -> int:
+    value = update.get("update_id")
+    return value if isinstance(value, int) else -1
 
 
 if __name__ == "__main__":

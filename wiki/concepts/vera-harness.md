@@ -38,6 +38,13 @@ runtime execution explicit:
   configured turn and retry budgets, maps each turn to continue/complete/retry/
   block/fail decisions, emits task lifecycle events, and persists minimal run
   state so active tasks are not duplicated after restart.
+- **Operational loop:** drains accepted Telegram tasks into the orchestration
+  loop, sends started and terminal Telegram status replies, and emits
+  audit-suitable logs with task ids, Telegram ids, workspace paths, Codex
+  session/turn ids when available, and final outcomes.
+- **Smoke modes:** provides a no-secret fake Telegram-to-Codex path for local
+  validation and a one-cycle live smoke path for configured Telegram bot plus
+  local Codex app-server environments.
 
 ## Durable Constraints
 
@@ -63,8 +70,10 @@ runtime execution explicit:
 - Cleanup must be explicit and constrained to paths that remain inside the
   configured workspace root after resolution.
 - Telegram replies should be concise and action-oriented: accepted, rejected,
-  started, completed, and blocked states should be obvious without exposing
-  more context than the chat already supplied.
+  started, completed, blocked, and failed states should be obvious without
+  exposing more context than the chat already supplied.
+- Operational logs should preserve enough IDs to debug and later audit a run
+  while avoiding raw Telegram message text and unnecessary user context.
 - Orchestration run state should record task ids, run ids, workspace paths,
   turn counts, status, and compact diagnostics, but not raw chat history or
   broader user context.
