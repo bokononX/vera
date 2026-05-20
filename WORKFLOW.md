@@ -25,7 +25,7 @@ polling:
   interval_ms: 30000
 
 hooks:
-  after_create: "git clone __CLONE_URL__ ."
+  after_create: "git clone git@github.com:bokononX/vera.git ."
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`
