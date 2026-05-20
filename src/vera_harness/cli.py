@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .config import ConfigError, HarnessConfig
-from .orchestrator import VeraHarness, format_dry_run
+from .orchestrator import VeraHarness, format_dry_run, format_poll_once
+from .telegram import TelegramApiError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,6 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Plan a Telegram-originated Codex run without network calls or Codex launch.",
+    )
+    parser.add_argument(
+        "--poll-once",
+        action="store_true",
+        help="Long-poll Telegram once, queue accepted tasks, and exit without launching Codex.",
     )
     parser.add_argument(
         "--message",
@@ -45,17 +51,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if not args.dry_run:
-        parser.error("live Telegram/Codex runtime is not implemented; use --dry-run")
+    if args.dry_run and args.poll_once:
+        parser.error("choose only one mode: --dry-run or --poll-once")
+    if not args.dry_run and not args.poll_once:
+        parser.error("choose a mode: --dry-run or --poll-once")
 
     try:
-        config = HarnessConfig.from_env(require_secrets=False)
+        config = HarnessConfig.from_env(require_secrets=args.poll_once)
         if args.workspace_root is not None:
             config = replace(
                 config,
                 workspace_root=Path(args.workspace_root).expanduser().resolve(),
             )
         harness = VeraHarness(config)
+        if args.poll_once:
+            print(format_poll_once(harness.poll_telegram_once()))
+            return 0
+
         result = harness.dry_run_task(
             text=args.message,
             chat_id=args.chat_id,
@@ -64,7 +76,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             username=args.username,
             create_workspace=not args.no_create_workspace,
         )
-    except (ConfigError, PermissionError, ValueError) as exc:
+    except (ConfigError, PermissionError, TelegramApiError, ValueError) as exc:
         print("vera-harness: {}".format(exc), file=sys.stderr)
         return 2
 
