@@ -1,0 +1,11 @@
+{
+  "telegram": {
+    "allowed_chat_ids": [12345],
+    "allowed_user_ids": [67890],
+    "api_base_url": "https://api.telegram.org",
+    "poll_timeout_seconds": 30,
+    "request_timeout_seconds": 35,
+    "state_path": "./.vera/telegram_state.json",
+    "unauthorized_response": null
+  }
+}

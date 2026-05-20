@@ -37,10 +37,12 @@ tasks for orchestration and sends Telegram status replies, but it does not
 launch Codex.
 
 ```sh
+mkdir -p .vera
+cp config/telegram.example.json .vera/telegram_config.json
+# Edit .vera/telegram_config.json with your allowed Telegram chat/user ids.
 export VERA_TELEGRAM_BOT_TOKEN="..."
-export VERA_ALLOWED_CHAT_IDS="12345"
-export VERA_ALLOWED_USER_IDS="67890"
 
+PYTHONPATH=src python3 -m vera_harness --check-config
 PYTHONPATH=src python3 -m vera_harness --poll-once
 ```
 
@@ -51,29 +53,63 @@ and sends concise Telegram replies such as `Accepted: queued.` or
 `Blocked: I need your judgment before continuing.`
 
 Unauthorized chats/users are ignored by default. Set
-`VERA_TELEGRAM_UNAUTHORIZED_RESPONSE` to send a short rejection response
-instead.
+`telegram.unauthorized_response` in the local Telegram config file to send a
+short rejection response instead.
 
 Telegram offset and task lifecycle state are persisted locally at
-`VERA_TELEGRAM_STATE_PATH`. The state file stores update ids and task metadata
-such as chat id, user id, message id, and lifecycle status. It does not persist
-raw Telegram message text or usernames.
+`telegram.state_path`. The state file stores update ids and task metadata such
+as chat id, user id, message id, and lifecycle status. It does not persist raw
+Telegram message text or usernames.
 
 ## Configuration
 
-Configuration is read from environment variables. Dry-run mode does not require
-secrets. Telegram polling validates live Bot API and allow-list settings.
+Telegram non-secret connectivity settings are read from a JSON config file.
+The default local path is `./.vera/telegram_config.json`, which is ignored by
+git. Use `--telegram-config /path/to/telegram.json` or
+`VERA_TELEGRAM_CONFIG_PATH=/path/to/telegram.json` to override it. The
+committed `config/telegram.example.json` file is a template only and must not
+contain a bot token.
+
+Only the bot token remains secret-backed:
+
+```sh
+export VERA_TELEGRAM_BOT_TOKEN="..."
+```
+
+Dry-run mode does not require secrets. Telegram polling validates the bot token
+and at least one configured allow-list.
+
+Recommended Telegram config:
+
+```json
+{
+  "telegram": {
+    "allowed_chat_ids": [12345],
+    "allowed_user_ids": [67890],
+    "api_base_url": "https://api.telegram.org",
+    "poll_timeout_seconds": 30,
+    "request_timeout_seconds": 35,
+    "state_path": "./.vera/telegram_state.json",
+    "unauthorized_response": null
+  }
+}
+```
+
+For migration, the old non-secret Telegram environment variables are still
+recognized when no Telegram config file exists. When a config file is present,
+its Telegram values take precedence over those env vars. Do not put
+`bot_token`, `telegram_bot_token`, or `VERA_TELEGRAM_BOT_TOKEN` in config; the
+loader rejects secret fields.
+
+`--check-config` validates the complete live configuration without network
+calls and prints only a redacted token marker.
+
+Other harness and Codex settings remain environment-backed:
 
 | Variable | Required for dry run | Description |
 | --- | --- | --- |
-| `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required for `--poll-once`. |
-| `VERA_ALLOWED_CHAT_IDS` | No | Comma-separated Telegram chat ids allowed to submit tasks. Empty means unrestricted in dry run. |
-| `VERA_ALLOWED_USER_IDS` | No | Comma-separated Telegram user ids allowed to submit tasks. Empty means unrestricted in dry run. |
-| `VERA_TELEGRAM_API_BASE_URL` | No | Telegram API base URL. Defaults to `https://api.telegram.org`. |
-| `VERA_TELEGRAM_POLL_TIMEOUT_SECONDS` | No | Telegram long-poll timeout. Defaults to `30`. |
-| `VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS` | No | HTTP request timeout for Telegram API calls. Defaults to `35`. |
-| `VERA_TELEGRAM_STATE_PATH` | No | Local JSON file for Telegram update offsets and task lifecycle state. Defaults to `./.vera/telegram_state.json`. |
-| `VERA_TELEGRAM_UNAUTHORIZED_RESPONSE` | No | Optional concise response sent to unauthorized Telegram sources. Empty means ignore unauthorized updates after recording their offset. |
+| `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required for `--poll-once` and `--check-config`. |
+| `VERA_TELEGRAM_CONFIG_PATH` | No | Optional path to Telegram non-secret JSON config. Equivalent to `--telegram-config`. |
 | `VERA_WORKSPACE_ROOT` | No | Root directory for per-task workspaces. Defaults to `./.vera/workspaces`. |
 | `VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS` | No | Timeout for each configured workspace clone/bootstrap command. Defaults to `300`. |
 | `VERA_WORKSPACE_RETENTION_POLICY` | No | Retention policy recorded in workspace metadata: `retain`, `cleanup_on_success`, or `cleanup_on_completion`. Defaults to `retain`. |
