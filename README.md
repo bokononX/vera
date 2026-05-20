@@ -1,10 +1,10 @@
 # Vera Harness
 
-This repository contains the initial Python scaffold for the Vera agent
-harness. It can load configuration, synthesize the Herald policy prompt,
-resolve a per-task workspace, poll Telegram through the Bot API, queue
-authorized Telegram tasks, and print the planned Codex app-server invocation
-without launching Codex.
+This repository contains the Python scaffold for the Vera agent harness. It can
+load configuration, synthesize the Herald policy prompt, resolve a per-task
+workspace, poll Telegram through the Bot API, queue authorized Telegram tasks,
+print dry-run Codex app-server invocation plans, and drive a Codex app-server
+turn over newline-delimited JSON-RPC through a testable runtime adapter.
 
 ## Local Dry Run
 
@@ -78,7 +78,9 @@ secrets. Telegram polling validates live Bot API and allow-list settings.
 | `VERA_TURN_TIMEOUT_SECONDS` | No | Timeout for one Codex turn. Defaults to `300`. |
 | `VERA_RUN_TIMEOUT_SECONDS` | No | Timeout for the whole harness run. Defaults to `1800`. |
 | `VERA_APPROVAL_POLICY` | No | Planned Codex approval policy: `untrusted`, `on-request`, `on-failure`, or `never`. Defaults to `on-request`. |
-| `VERA_SANDBOX_MODE` | No | Planned Codex sandbox mode: `read-only`, `workspace-write`, or `danger-full-access`. Defaults to `workspace-write`. |
+| `VERA_SANDBOX_MODE` | No | Planned Codex sandbox mode: `read-only`, `workspace-write`, or `danger-full-access`. Defaults to `read-only`. |
+| `VERA_CODEX_APPROVAL_DECISION` | No | Optional unattended response for command/file approval prompts: `accept`, `acceptForSession`, `decline`, or `cancel`. Empty by default, which returns an explicit blocked outcome. |
+| `VERA_CODEX_AUTO_INPUT_RESPONSE` | No | Optional unattended text answer for app-server `request_user_input` prompts. Empty by default, which returns an explicit blocked outcome. |
 | `VERA_REPO_CLONE_COMMAND` | No | Optional shell-style command for future workspace repository cloning. Not executed in dry run. |
 | `VERA_REPO_BOOTSTRAP_COMMAND` | No | Optional shell-style command for future workspace bootstrap. Not executed in dry run. |
 
@@ -89,11 +91,11 @@ Do not commit actual secret values. Documentation should name variables only.
 Run the focused test suite:
 
 ```sh
-PYTHONPATH=src python3 -m unittest discover -s tests
+python3 -m pytest
 ```
 
-The tests use only the Python standard library and do not require live Telegram
-or Codex access.
+The tests use a fake JSON-RPC subprocess for runtime paths and do not require
+live Telegram or Codex access.
 
 ## Current Runtime Boundary
 
@@ -103,7 +105,7 @@ Implemented now:
 - domain models for Telegram tasks, harness runs, workspaces, and Codex turn
   results;
 - module boundaries for config, Telegram intake, Telegram state persistence,
-  workspace management, Codex runtime planning, prompt/policy, and
+  workspace management, Codex runtime planning/execution, prompt/policy, and
   orchestration;
 - Telegram Bot API long polling with injectable transport for tests;
 - authorization by configured chat and/or user ids;
@@ -111,11 +113,15 @@ Implemented now:
   persistence;
 - concise Telegram status replies for accepted, rejected, started, completed,
   and blocked task states;
-- dry-run CLI output for local validation.
+- dry-run CLI output for local validation;
+- Codex app-server launch over stdio JSON-RPC;
+- `initialize`, `thread/start`, and `turn/start` request flow;
+- structured runtime events for server notifications, approval-required,
+  input-required, completion, failure, cancellation, timeout, and process exit;
+- fail-closed unattended behavior unless explicit auto-response config is set.
 
 Not implemented in this ticket:
 
 - Telegram webhook handling;
-- Codex JSON-RPC or app-server client calls;
 - repository cloning or bootstrap execution;
 - continuous multi-task orchestration beyond the in-memory accepted-task queue.
