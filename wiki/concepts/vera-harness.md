@@ -17,8 +17,10 @@ runtime execution explicit:
 - **Policy prompt:** encodes Herald's role as a representative of the user,
   including evidence-based reasoning, minimal footprint, reversibility, and
   transparency about limits.
-- **Workspace management:** resolves one local workspace per task so Codex work
-  can be isolated and reversible by default.
+- **Workspace management:** resolves one local workspace per task, validates
+  that the path cannot escape the configured workspace root, records compact
+  workspace metadata, and exposes explicit reuse, fresh-create, bootstrap, and
+  cleanup behavior.
 - **Codex runtime execution:** launches the configured Codex app-server command
   inside the task workspace, initializes the JSON-RPC session, starts a thread
   with configured approval and sandbox policy, and starts task turns with the
@@ -40,6 +42,14 @@ runtime execution explicit:
   planning.
 - The harness should collect and persist only the task context and lifecycle
   metadata needed for the run.
+- Workspace identity should come from the stable Telegram task/run id and map
+  to a deterministic safe path segment under the configured workspace root.
+- Existing workspace reuse, fresh creation, and require-existing continuation
+  should be explicit policy choices rather than implicit side effects.
+- Bootstrap commands may prepare a workspace, but they must run inside that
+  workspace, be timeout-bound, and capture stdout/stderr for diagnostics.
+- Cleanup must be explicit and constrained to paths that remain inside the
+  configured workspace root after resolution.
 - Telegram replies should be concise and action-oriented: accepted, rejected,
   started, completed, and blocked states should be obvious without exposing
   more context than the chat already supplied.

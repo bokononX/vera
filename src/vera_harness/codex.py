@@ -7,7 +7,7 @@ import queue
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -122,9 +122,10 @@ class CodexRuntimePlanner:
         self._config = config
 
     def plan(self, workspace: Workspace, prompt: str) -> CodexInvocation:
+        workspace_path = _validated_workspace_path(self._config.workspace_root, workspace.path)
         return CodexInvocation(
             command=self._config.codex_app_server_command,
-            workspace_path=workspace.path,
+            workspace_path=workspace_path,
             prompt=prompt,
             max_turns=self._config.max_turns,
             turn_timeout_seconds=self._config.turn_timeout_seconds,
@@ -154,10 +155,15 @@ class CodexAppServerRuntime:
     ) -> CodexRunResult:
         """Run one configured Codex turn and return the terminal outcome."""
 
-        if not invocation.workspace_path.is_dir():
+        workspace_path = _validated_workspace_path(
+            self._config.workspace_root,
+            invocation.workspace_path,
+        )
+        if not workspace_path.is_dir():
             raise CodexAppServerError(
-                "workspace does not exist: {}".format(invocation.workspace_path)
+                "workspace does not exist: {}".format(workspace_path)
             )
+        invocation = dataclass_replace(invocation, workspace_path=workspace_path)
 
         started_at = time.monotonic()
         events: List[CodexRuntimeEvent] = []
@@ -682,6 +688,18 @@ def _sandbox_policy(sandbox_mode: str, workspace_path: Path) -> Dict[str, Any]:
             "writableRoots": [str(workspace_path)],
         }
     return {"type": "readOnly", "networkAccess": False}
+
+
+def _validated_workspace_path(root: Path, workspace_path: Path) -> Path:
+    resolved_root = root.expanduser().resolve()
+    resolved_workspace = workspace_path.expanduser().resolve()
+    try:
+        resolved_workspace.relative_to(resolved_root)
+    except ValueError:
+        raise CodexAppServerError(
+            "workspace cwd escapes configured root: {}".format(resolved_workspace)
+        )
+    return resolved_workspace
 
 
 def _turn_terminal_state(turn: Mapping[str, Any]) -> _TerminalState:

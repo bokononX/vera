@@ -23,6 +23,8 @@ class HarnessConfigTests(unittest.TestCase):
                     "VERA_MAX_TURNS": "7",
                     "VERA_TURN_TIMEOUT_SECONDS": "11",
                     "VERA_RUN_TIMEOUT_SECONDS": "22",
+                    "VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS": "33",
+                    "VERA_WORKSPACE_RETENTION_POLICY": "cleanup_on_completion",
                     "VERA_APPROVAL_POLICY": "never",
                     "VERA_SANDBOX_MODE": "read-only",
                     "VERA_CODEX_APPROVAL_DECISION": "decline",
@@ -45,6 +47,8 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.max_turns, 7)
         self.assertEqual(config.turn_timeout_seconds, 11)
         self.assertEqual(config.run_timeout_seconds, 22)
+        self.assertEqual(config.workspace_bootstrap_timeout_seconds, 33)
+        self.assertEqual(config.workspace_retention_policy, "cleanup_on_completion")
         self.assertEqual(config.approval_policy, "never")
         self.assertEqual(config.sandbox_mode, "read-only")
         self.assertEqual(config.codex_approval_decision, "decline")
@@ -64,6 +68,8 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_state_path.name, "telegram_state.json")
         self.assertIsNone(config.telegram_unauthorized_response)
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server"))
+        self.assertEqual(config.workspace_bootstrap_timeout_seconds, 300)
+        self.assertEqual(config.workspace_retention_policy, "retain")
         self.assertEqual(config.sandbox_mode, "read-only")
         self.assertIsNone(config.codex_approval_decision)
         self.assertIsNone(config.codex_auto_input_response)
@@ -86,6 +92,8 @@ class HarnessConfigTests(unittest.TestCase):
             {"VERA_TELEGRAM_API_BASE_URL": "api.telegram.org"},
             {"VERA_TELEGRAM_POLL_TIMEOUT_SECONDS": "0"},
             {"VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS": "-1"},
+            {"VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS": "0"},
+            {"VERA_WORKSPACE_RETENTION_POLICY": "always-delete"},
             {"VERA_APPROVAL_POLICY": "sometimes"},
             {"VERA_SANDBOX_MODE": "open"},
             {"VERA_CODEX_APPROVAL_DECISION": "approve"},
