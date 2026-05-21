@@ -70,11 +70,12 @@ PYTHONPATH=src python3 -m vera_harness --check-config
 PYTHONPATH=src python3 -m vera_harness --monitor
 ```
 
-`--monitor` runs until interrupted. Use `--max-poll-cycles N` to stop after a
-bounded number of polling cycles, and `--poll-interval-seconds N` to control the
-sleep between cycles. Each cycle prints an audit-friendly log that includes the
-task id, Telegram chat/update/message ids, workspace path, Codex session/turn
-ids when available, status messages sent to Telegram, and final outcome.
+`--monitor` runs the same headless loop used by the default TUI console and runs
+until interrupted. Use `--max-poll-cycles N` to stop after a bounded number of
+polling cycles, and `--poll-interval-seconds N` to control the sleep between
+cycles. Each cycle prints an audit-friendly log that includes the task id,
+Telegram chat/update/message ids, workspace path, Codex session/turn ids when
+available, status messages sent to Telegram, and final outcome.
 
 `--poll-once` remains available for intake-only diagnostics. It performs one
 `getUpdates` call, queues accepted tasks, sends `Accepted: queued.`, and exits
@@ -89,8 +90,20 @@ PYTHONPATH=src python3 -m vera_harness --console-tui
 PYTHONPATH=src python3 -m vera_harness --console-gui --console-port 8765
 ```
 
-The TUI opens in the current terminal. The GUI serves a local web app and prints
-the listening URL. Both read:
+The TUI opens in the current terminal and, by default, starts the Telegram
+monitor loop in the same process. Exiting the TUI requests the managed monitor
+loop to stop. Startup/configuration failures are written into the console event
+stream so the terminal shows a local error state instead of an empty viewer.
+
+Use view-only mode to attach to run state and events from an already-running
+monitor without starting another poller:
+
+```sh
+PYTHONPATH=src python3 -m vera_harness --console-tui --console-view-only
+```
+
+The GUI serves a local web app and prints the listening URL. The console
+surfaces read:
 
 - `VERA_RUN_STATE_PATH` for active, completed, blocked, and failed runs;
 - `VERA_EVENT_LOG_PATH` for structured task, Codex, source-channel, and error
@@ -279,8 +292,9 @@ Do not commit actual secret values. Documentation should name variables only.
   Codex turn times out. Tune `VERA_TURN_TIMEOUT_SECONDS`,
   `VERA_RUN_TIMEOUT_SECONDS`, or investigate the Codex app-server logs.
 - Empty console: confirm `VERA_RUN_STATE_PATH` points to the same run-state file
-  used by `--monitor`, or run a fake-state smoke command to validate the local
-  surface.
+  used by the managed `--console-tui` loop or a separate `--monitor`. Use
+  `--console-tui --console-view-only` when attaching to an existing monitor, or
+  run a fake-state smoke command to validate the local surface.
 - Missing console events: confirm `VERA_EVENT_LOG_PATH` is writable by the
   monitor process. The console can still show run state without events, but the
   log stream and last-turn summaries will be sparse.

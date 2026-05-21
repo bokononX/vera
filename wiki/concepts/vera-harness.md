@@ -45,7 +45,10 @@ runtime execution explicit:
 - **Console observability:** projects run state, structured events, focus
   selection, last-turn summaries, current plan, redacted log stream, and budget
   telemetry into a shared state provider used by both terminal and local web
-  consoles.
+  consoles. The terminal console is operational by default for live local use:
+  it owns a managed Telegram monitor loop unless explicitly launched in
+  view-only mode, and it reports monitor startup/configuration failures through
+  the same event stream it renders.
 - **Smoke modes:** provides a no-secret fake Telegram-to-Codex path for local
   validation and a one-cycle live smoke path for configured Telegram bot plus
   local Codex app-server environments.
@@ -81,6 +84,9 @@ runtime execution explicit:
 - Console events should use a small structured schema rather than ad hoc log
   parsing, and should redact secrets plus raw private source-channel bodies by
   default.
+- The default terminal console path should run against the same run-state and
+  event-log files as the monitor loop it supervises; attaching to an existing
+  monitor should require an explicit viewer-only choice.
 - Budget telemetry should display available rate-limit, usage, and threshold
   data when configured while clearly distinguishing unknown and unavailable
   states when credentials or snapshots are absent.

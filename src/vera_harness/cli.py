@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import tempfile
+import threading
 import time
+import uuid
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
@@ -48,7 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--console-tui",
         action="store_true",
-        help="Launch the local Vera terminal console.",
+        help="Launch the local Vera terminal console and managed monitor loop.",
+    )
+    parser.add_argument(
+        "--console-view-only",
+        action="store_true",
+        help="Launch --console-tui as a viewer without starting a monitor loop.",
     )
     parser.add_argument(
         "--console-gui",
@@ -159,6 +168,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--poll-interval-seconds must be zero or greater")
     if args.console_port < 0:
         parser.error("--console-port must be zero or greater")
+    if args.console_view_only and not args.console_tui:
+        parser.error("--console-view-only requires --console-tui")
 
     try:
         config = HarnessConfig.load(
@@ -265,20 +276,7 @@ def _run_monitor(
     cycles = 0
     while True:
         result = harness.run_telegram_poll_once()
-        for delivery in result.status_deliveries:
-            event_log.append_source_event(
-                source="telegram",
-                event_type="telegram_status",
-                summary=delivery.text,
-                task_id=delivery.task_id,
-                run_id=None,
-                details={
-                    "chat_id": delivery.chat_id,
-                    "message_id": delivery.message_id,
-                    "update_id": delivery.update_id,
-                    "status": delivery.status.value,
-                },
-            )
+        _append_telegram_status_events(event_log, result)
         print(format_telegram_loop(result, title=title))
         cycles += 1
         if max_poll_cycles is not None and cycles >= max_poll_cycles:
@@ -289,12 +287,157 @@ def _run_monitor(
 def _run_console_tui(config: HarnessConfig, args: argparse.Namespace) -> int:
     from .console_tui import run_tui
 
-    return run_tui(
-        _console_provider(config, args),
-        focused_agent_id=args.console_focus,
-        event_filter=args.console_filter,
-        smoke=args.console_smoke,
+    provider = _console_provider(config, args)
+    supervisor = None
+    if _console_should_manage_monitor(args):
+        supervisor = _ConsoleMonitorSupervisor(
+            config,
+            poll_interval_seconds=args.poll_interval_seconds,
+        )
+        supervisor.start()
+    try:
+        return run_tui(
+            provider,
+            focused_agent_id=args.console_focus,
+            event_filter=args.console_filter,
+            smoke=args.console_smoke,
+        )
+    finally:
+        if supervisor is not None:
+            supervisor.stop()
+
+
+def _console_should_manage_monitor(args: argparse.Namespace) -> bool:
+    return bool(args.console_tui and not args.console_view_only and not args.console_fake_state)
+
+
+class _ConsoleMonitorSupervisor:
+    """Own the monitor loop lifecycle while the TUI owns terminal rendering."""
+
+    def __init__(self, config: HarnessConfig, poll_interval_seconds: float) -> None:
+        self._config = config
+        self._poll_interval_seconds = poll_interval_seconds
+        self._event_log = _console_event_log(config)
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._harness: Optional[VeraHarness] = None
+
+    def start(self) -> None:
+        startup_error = _console_monitor_startup_error(self._config)
+        if startup_error is not None:
+            _append_console_monitor_error(
+                self._event_log,
+                event_type="console_monitor_startup_failed",
+                summary="Console monitor did not start: {}".format(startup_error),
+                config=self._config,
+            )
+            return
+
+        self._harness = VeraHarness(self._config, on_event=self._event_log.append_task_event)
+        self._event_log.append_source_event(
+            source="console-tui",
+            event_type="console_monitor_started",
+            summary="Console monitor started.",
+            details=_console_monitor_details(self._config),
+        )
+        self._thread = threading.Thread(
+            target=self._run,
+            name="vera-console-tui-monitor",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self._poll_interval_seconds + 1.0))
+
+    def _run(self) -> None:
+        assert self._harness is not None
+        try:
+            while not self._stop_event.is_set():
+                result = self._harness.run_telegram_poll_once()
+                _append_telegram_status_events(self._event_log, result)
+                if self._stop_event.wait(self._poll_interval_seconds):
+                    break
+        except Exception as exc:  # noqa: BLE001 - surface background failures in the console.
+            _append_console_monitor_error(
+                self._event_log,
+                event_type="console_monitor_failed",
+                summary="Console monitor stopped after error: {}".format(exc),
+                config=self._config,
+            )
+        finally:
+            self._event_log.append_source_event(
+                source="console-tui",
+                event_type="console_monitor_stopped",
+                summary="Console monitor stopped.",
+                details=_console_monitor_details(self._config),
+            )
+
+
+def _console_monitor_startup_error(config: HarnessConfig) -> Optional[str]:
+    failures = []
+    if not config.telegram_bot_token:
+        failures.append("VERA_TELEGRAM_BOT_TOKEN is required for live console monitoring")
+    if not config.allowed_chat_ids and not config.allowed_user_ids:
+        failures.append(
+            "telegram.allowed_chat_ids or telegram.allowed_user_ids is required for live console monitoring"
+        )
+    executable = config.codex_app_server_command.argv[0]
+    if shutil.which(executable) is None:
+        failures.append("Codex app-server executable is not available on PATH: {}".format(executable))
+    if failures:
+        return "; ".join(failures)
+    return None
+
+
+def _append_telegram_status_events(event_log: Any, result: Any) -> None:
+    for delivery in result.status_deliveries:
+        event_log.append_source_event(
+            source="telegram",
+            event_type="telegram_status",
+            summary=delivery.text,
+            task_id=delivery.task_id,
+            run_id=None,
+            details={
+                "chat_id": delivery.chat_id,
+                "message_id": delivery.message_id,
+                "update_id": delivery.update_id,
+                "status": delivery.status.value,
+            },
+        )
+
+
+def _append_console_monitor_error(
+    event_log: Any,
+    event_type: str,
+    summary: str,
+    config: HarnessConfig,
+) -> None:
+    from .observability import ConsoleEvent, ConsoleEventCategory
+
+    event_log.append_console_event(
+        ConsoleEvent(
+            event_id="evt-{}".format(uuid.uuid4().hex),
+            created_at=datetime.now(timezone.utc).isoformat(),
+            category=ConsoleEventCategory.ERROR,
+            event_type=event_type,
+            source="console-tui",
+            summary=summary,
+            severity="error",
+            details=_console_monitor_details(config),
+        )
     )
+
+
+def _console_monitor_details(config: HarnessConfig) -> Mapping[str, object]:
+    return {
+        "run_state_path": str(config.run_state_path),
+        "event_log_path": str(config.event_log_path),
+        "telegram_state_path": str(config.telegram_state_path),
+        "codex_app_server_command": config.codex_app_server_command.display,
+    }
 
 
 def _run_console_gui(config: HarnessConfig, args: argparse.Namespace) -> int:
