@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
 
-from .models import OwnerProfile
+from .assistant_identity import (
+    AssistantIdentityConfigError,
+    assistant_identity_from_mapping,
+    load_assistant_identity_file,
+)
+from .models import AssistantIdentity, OwnerProfile
 
 
 class ConfigError(ValueError):
@@ -83,6 +88,9 @@ class HarnessConfig:
     telegram_request_timeout_seconds: int
     telegram_state_path: Path
     telegram_unauthorized_response: Optional[str]
+    assistant_identity: AssistantIdentity
+    assistant_identity_path: Path
+    assistant_identity_interview_state_path: Path
     owner_profile: Optional[OwnerProfile]
     run_state_path: Path
     chat_session_state_path: Path
@@ -121,11 +129,13 @@ class HarnessConfig:
         local_config = _load_local_config(config_path, explicit_path)
         telegram_config = _telegram_config_from_local(local_config)
         owner_config = _owner_config_from_local(local_config)
+        assistant_config = _assistant_config_from_local(local_config)
         return cls.from_env(
             source,
             require_secrets=require_secrets,
             telegram_config=telegram_config,
             owner_config=owner_config,
+            assistant_config=assistant_config,
         )
 
     @classmethod
@@ -135,9 +145,29 @@ class HarnessConfig:
         require_secrets: bool = True,
         telegram_config: Optional[Mapping[str, Any]] = None,
         owner_config: Optional[Mapping[str, Any]] = None,
+        assistant_config: Optional[Mapping[str, Any]] = None,
     ) -> "HarnessConfig":
         source = os.environ if env is None else env
         telegram_source = telegram_config or {}
+        assistant_source = assistant_config or {}
+        assistant_identity_path = _parse_path(
+            _setting_value(
+                assistant_source,
+                "identity_path",
+                source.get("VERA_ASSISTANT_IDENTITY_PATH", "./.vera/assistant_identity.json"),
+            ),
+            "assistant.identity_path",
+        )
+        assistant_identity_interview_state_path = Path(
+            source.get(
+                "VERA_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH",
+                "./.vera/assistant_identity_interviews.json",
+            )
+        ).expanduser().resolve()
+        assistant_identity = _parse_assistant_identity(
+            assistant_config,
+            assistant_identity_path,
+        )
         owner_profile = _parse_owner_profile(owner_config)
         telegram_bot_token = _optional_text(source.get("VERA_TELEGRAM_BOT_TOKEN"))
         allowed_chat_ids = _parse_int_list(
@@ -299,6 +329,9 @@ class HarnessConfig:
             telegram_request_timeout_seconds=telegram_request_timeout_seconds,
             telegram_state_path=telegram_state_path,
             telegram_unauthorized_response=telegram_unauthorized_response,
+            assistant_identity=assistant_identity,
+            assistant_identity_path=assistant_identity_path,
+            assistant_identity_interview_state_path=assistant_identity_interview_state_path,
             owner_profile=owner_profile,
             run_state_path=run_state_path,
             chat_session_state_path=chat_session_state_path,
@@ -507,6 +540,71 @@ def _owner_config_from_local(local_config: Mapping[str, Any]) -> Optional[Mappin
     if unknown:
         raise ConfigError("Owner config contains unknown fields: {}".format(", ".join(unknown)))
     return owner_config
+
+
+def _assistant_config_from_local(local_config: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    if not local_config or "assistant" not in local_config:
+        return None
+    assistant_config = local_config["assistant"]
+    if not isinstance(assistant_config, dict):
+        raise ConfigError("assistant must be a JSON object")
+    forbidden = {
+        "api_key",
+        "bot_token",
+        "password",
+        "secret",
+        "telegram_bot_token",
+        "token",
+        "VERA_TELEGRAM_BOT_TOKEN",
+    }
+    present_forbidden = sorted(forbidden.intersection(assistant_config.keys()))
+    if present_forbidden:
+        raise ConfigError(
+            "Assistant config must not contain secret fields: {}".format(
+                ", ".join(present_forbidden)
+            )
+        )
+    allowed = {
+        "identity_path",
+        "name",
+        "short_description",
+        "mission",
+        "core_values",
+        "communication_principles",
+        "boundaries",
+        "transparency_rules",
+        "relationship_to_owner",
+        "proactivity",
+        "owner_special_treatment",
+    }
+    unknown = sorted(set(assistant_config.keys()) - allowed)
+    if unknown:
+        raise ConfigError("Assistant config contains unknown fields: {}".format(", ".join(unknown)))
+    return assistant_config
+
+
+def _parse_assistant_identity(
+    assistant_config: Optional[Mapping[str, Any]],
+    assistant_identity_path: Path,
+) -> AssistantIdentity:
+    identity = AssistantIdentity.default()
+    try:
+        if assistant_config is not None:
+            inline_config = {
+                key: value
+                for key, value in assistant_config.items()
+                if key != "identity_path"
+            }
+            identity = assistant_identity_from_mapping(
+                inline_config,
+                base=identity,
+                source_name="assistant",
+            )
+        if assistant_identity_path.exists():
+            identity = load_assistant_identity_file(assistant_identity_path, base=identity)
+    except AssistantIdentityConfigError as exc:
+        raise ConfigError(str(exc))
+    return identity
 
 
 def _parse_owner_profile(owner_config: Optional[Mapping[str, Any]]) -> Optional[OwnerProfile]:

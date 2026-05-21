@@ -259,6 +259,11 @@ def _format_config_check(config: HarnessConfig) -> str:
             "telegram_request_timeout_seconds: {}".format(config.telegram_request_timeout_seconds),
             "telegram_state_path: {}".format(config.telegram_state_path),
             "telegram_unauthorized_response: {}".format(unauthorized),
+            "assistant_identity_name: {}".format(config.assistant_identity.safe_display_name),
+            "assistant_identity_path: {}".format(config.assistant_identity_path),
+            "assistant_identity_interview_state_path: {}".format(
+                config.assistant_identity_interview_state_path
+            ),
             "owner_identity: {}".format(_format_owner_identity(config)),
             "owner_profile_source: {}".format(_format_owner_profile_source(config)),
             "chat_session_state_path: {}".format(config.chat_session_state_path),
@@ -498,6 +503,11 @@ def _console_monitor_details(config: HarnessConfig) -> Mapping[str, object]:
         "event_log_path": str(config.event_log_path),
         "telegram_state_path": str(config.telegram_state_path),
         "chat_session_state_path": str(config.chat_session_state_path),
+        "assistant_identity_name": config.assistant_identity.safe_display_name,
+        "assistant_identity_path": str(config.assistant_identity_path),
+        "assistant_identity_interview_state_path": str(
+            config.assistant_identity_interview_state_path
+        ),
         "identity_profile_path": str(config.identity_profile_path),
         "identity_interview_state_path": str(config.identity_interview_state_path),
         "codex_app_server_command": config.codex_app_server_command.display,

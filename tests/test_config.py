@@ -19,6 +19,10 @@ class HarnessConfigTests(unittest.TestCase):
                     "VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS": "13",
                     "VERA_TELEGRAM_STATE_PATH": str(Path(temp_dir, "telegram-state.json")),
                     "VERA_TELEGRAM_UNAUTHORIZED_RESPONSE": "This chat is not authorized.",
+                    "VERA_ASSISTANT_IDENTITY_PATH": str(Path(temp_dir, "assistant-identity.json")),
+                    "VERA_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH": str(
+                        Path(temp_dir, "assistant-identity-interviews.json")
+                    ),
                     "VERA_RUN_STATE_PATH": str(Path(temp_dir, "run-state.json")),
                     "VERA_CHAT_SESSION_STATE_PATH": str(Path(temp_dir, "chat-sessions.json")),
                     "VERA_IDENTITY_PROFILE_PATH": str(Path(temp_dir, "identity-profile.json")),
@@ -48,6 +52,15 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_request_timeout_seconds, 13)
         self.assertEqual(config.telegram_state_path, Path(temp_dir, "telegram-state.json").resolve())
         self.assertEqual(config.telegram_unauthorized_response, "This chat is not authorized.")
+        self.assertEqual(config.assistant_identity.safe_display_name, "Vera")
+        self.assertEqual(
+            config.assistant_identity_path,
+            Path(temp_dir, "assistant-identity.json").resolve(),
+        )
+        self.assertEqual(
+            config.assistant_identity_interview_state_path,
+            Path(temp_dir, "assistant-identity-interviews.json").resolve(),
+        )
         self.assertIsNone(config.owner_profile)
         self.assertEqual(config.run_state_path, Path(temp_dir, "run-state.json").resolve())
         self.assertEqual(config.chat_session_state_path, Path(temp_dir, "chat-sessions.json").resolve())
@@ -79,6 +92,13 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_request_timeout_seconds, 35)
         self.assertEqual(config.telegram_state_path.name, "telegram_state.json")
         self.assertIsNone(config.telegram_unauthorized_response)
+        self.assertEqual(config.assistant_identity.safe_display_name, "Vera")
+        self.assertIn("personal assistant", config.assistant_identity.short_description)
+        self.assertEqual(config.assistant_identity_path.name, "assistant_identity.json")
+        self.assertEqual(
+            config.assistant_identity_interview_state_path.name,
+            "assistant_identity_interviews.json",
+        )
         self.assertIsNone(config.owner_profile)
         self.assertEqual(config.run_state_path.name, "run_state.json")
         self.assertEqual(config.chat_session_state_path.name, "chat_sessions.json")
@@ -188,6 +208,52 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.owner_profile.wiki_profile_path, profile_path.resolve())
         self.assertIn("prefer correction", config.owner_profile.wiki_profile_excerpt)
 
+    def test_load_reads_assistant_identity_from_config_and_profile_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            assistant_path = Path(temp_dir, "assistant.json")
+            assistant_path.write_text(
+                json.dumps(
+                    {
+                        "name": "Mira",
+                        "mission": "Help Victor think clearly.",
+                        "communication_principles": ["brief, precise, and candid"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "telegram": {"allowed_user_ids": [200]},
+                        "assistant": {
+                            "identity_path": str(assistant_path),
+                            "name": "Inline name is overridden by profile file",
+                            "short_description": "a local personal assistant",
+                            "core_values": ["truth", "agency"],
+                            "relationship_to_owner": "Help the owner as a configured assistant.",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = HarnessConfig.load(
+                {"VERA_TELEGRAM_BOT_TOKEN": "token-placeholder"},
+                telegram_config_path=str(config_path),
+                require_secrets=True,
+            )
+
+        self.assertEqual(config.assistant_identity.safe_display_name, "Mira")
+        self.assertEqual(config.assistant_identity_path, assistant_path.resolve())
+        self.assertEqual(config.assistant_identity.mission, "Help Victor think clearly.")
+        self.assertEqual(config.assistant_identity.short_description, "a local personal assistant")
+        self.assertEqual(config.assistant_identity.core_values, ("truth", "agency"))
+        self.assertEqual(
+            config.assistant_identity.communication_principles,
+            ("brief, precise, and candid",),
+        )
+
     def test_explicit_missing_or_malformed_telegram_config_fails_clearly(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             missing_path = Path(temp_dir, "missing.json")
@@ -231,6 +297,35 @@ class HarnessConfigTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ConfigError, "Owner config must not contain secret fields"):
+                HarnessConfig.load({}, telegram_config_path=str(config_path), require_secrets=False)
+
+    def test_assistant_config_rejects_secret_fields_and_human_overclaims(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "telegram": {"allowed_chat_ids": [123]},
+                        "assistant": {"token": "not-allowed"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "Assistant config must not contain secret fields"):
+                HarnessConfig.load({}, telegram_config_path=str(config_path), require_secrets=False)
+
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "telegram": {"allowed_chat_ids": [123]},
+                        "assistant": {"short_description": "I am human."},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "must not configure the assistant"):
                 HarnessConfig.load({}, telegram_config_path=str(config_path), require_secrets=False)
 
     def test_env_allow_list_still_works_when_no_default_config_exists(self):

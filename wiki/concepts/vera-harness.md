@@ -19,6 +19,12 @@ runtime execution explicit:
   known status, pending prompt, and last assistant response so monitor restarts
   can resume or safely recreate the conversational session without preserving
   raw inbound chat history.
+- **Assistant identity profile:** defines the user-facing assistant separately
+  from the human owner. The profile carries the assistant name, mission, values,
+  communication principles, product-truth boundaries, transparency rules,
+  owner relationship, proactivity guidance, and owner-specific treatment rules.
+  It can be configured locally or refined through an owner-confirmed Telegram
+  interview before Codex sees the chat turn.
 - **Owner identity/style profile:** intercepts explicit identity interview,
   inspection, and correction messages in persistent Telegram chat mode before
   Codex. The interview asks short progressive questions, requires confirmation
@@ -32,12 +38,14 @@ runtime execution explicit:
   same non-secret local config, keyed by stable Telegram `user_id` with display
   labels, values, priorities, communication style, escalation boundaries, and
   an optional refreshable local/wiki profile file.
-- **Policy prompt:** encodes Herald's role as a faithful representative,
-  The Place's coordination protocols, and Vera's trust constraints, including
-  onion peeling, interest surfacing, face-saving, minimal disclosure,
-  non-sycophancy, reversibility, evidence, uncertainty, and explicit blockers.
-  Owner sessions receive an additional relationship block; authorized
-  non-owner sessions do not.
+- **Policy prompt:** starts from the active assistant identity so the Telegram
+  assistant introduces and conducts itself as Vera or the configured local
+  name, not as Codex. It then encodes Herald's role as a faithful
+  representative, The Place's coordination protocols, and Vera's trust
+  constraints, including onion peeling, interest surfacing, face-saving,
+  minimal disclosure, non-sycophancy, reversibility, evidence, uncertainty, and
+  explicit blockers. Owner sessions receive an additional relationship block;
+  authorized non-owner sessions do not.
 - **Workspace management:** resolves local workspaces for either legacy tasks
   or persistent chat sessions, validates that paths cannot escape the configured
   workspace root, records compact workspace metadata, and exposes explicit
@@ -71,8 +79,8 @@ runtime execution explicit:
   it owns a managed Telegram monitor loop unless explicitly launched in
   view-only mode, and it reports monitor startup/configuration failures through
   the same event stream it renders. Console agent rows include the active
-  session identity label while keeping raw owner profile content redacted by
-  default.
+  assistant identity name and redacted session identity label while keeping raw
+  owner profile content redacted by default.
 - **Smoke modes:** provides a no-secret fake Telegram-to-Codex path for local
   validation and a one-cycle live smoke path for configured Telegram bot plus
   local Codex app-server environments.
@@ -91,6 +99,16 @@ runtime execution explicit:
 - Non-secret Telegram connectivity settings should prefer the local config file
   interface over environment variables; env compatibility is only a migration
   fallback when no config file is present.
+- Assistant identity is distinct from owner identity: it describes the
+  configured assistant's user-facing name, mission, values, style, boundaries,
+  and runtime-transparency language, while owner identity describes the human
+  user's preferences and memory.
+- Assistant identity must preserve product truth. It should not claim human,
+  sentient, or independent status, and should explain Codex/OpenAI as the
+  runtime/tooling layer when directly asked or operationally relevant.
+- Initial and follow-up chat prompts should include the active assistant
+  identity before user text so the default Codex self-description cannot become
+  the normal Telegram identity.
 - Owner identity is distinct from the Telegram allow-list: matching uses stable
   Telegram `user_id`, and owner-specific prompt behavior must not apply to
   other authorized users.

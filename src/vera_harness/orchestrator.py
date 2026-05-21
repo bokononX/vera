@@ -7,6 +7,11 @@ import time
 from dataclasses import dataclass, replace
 from typing import Callable, Dict, List, Optional, Protocol, Tuple
 
+from .assistant_identity import (
+    AssistantIdentityController,
+    JsonAssistantIdentityInterviewStore,
+    JsonAssistantIdentityStore,
+)
 from .chat import JsonTelegramChatSessionStore, TelegramChatSession
 
 from .codex import (
@@ -32,6 +37,7 @@ from .models import (
     HarnessRun,
     HarnessRunStatus,
     OrchestrationDecision,
+    AssistantIdentity,
     OwnerProfile,
     RunState,
     TaskEvent,
@@ -223,6 +229,7 @@ class VeraHarness:
         chat_store: Optional[ChatSessionStore] = None,
         chat_runtime_factory: Optional[ChatRuntimeFactory] = None,
         identity_controller: Optional[IdentityInterviewController] = None,
+        assistant_identity_controller: Optional[AssistantIdentityController] = None,
         on_event: Optional[TaskEventCallback] = None,
     ) -> None:
         self._config = config
@@ -239,6 +246,18 @@ class VeraHarness:
         self._identity = identity_controller or IdentityInterviewController(
             profile_store=JsonIdentityProfileStore(config.identity_profile_path),
             interview_store=JsonIdentityInterviewStore(config.identity_interview_state_path),
+        )
+        self._assistant_identity = (
+            assistant_identity_controller
+            or AssistantIdentityController(
+                identity_store=JsonAssistantIdentityStore(
+                    config.assistant_identity_path,
+                    config.assistant_identity,
+                ),
+                interview_store=JsonAssistantIdentityInterviewStore(
+                    config.assistant_identity_interview_state_path
+                ),
+            )
         )
         self._on_event = on_event
 
@@ -388,13 +407,20 @@ class VeraHarness:
             )
         )
         harness_run = replace(harness_run, workspace=workspace, status=HarnessRunStatus.RUNNING)
+        assistant_identity = self._assistant_identity.active_identity()
         workspace_payload = {
             "workspace_path": str(workspace.path),
             "created": workspace.created,
             "reused": workspace.reused,
             "reuse_policy": workspace.reuse_policy.value,
         }
-        workspace_payload.update(_telegram_identity_payload(task, self._config.owner_profile))
+        workspace_payload.update(
+            _telegram_identity_payload(
+                task,
+                self._config.owner_profile,
+                assistant_identity,
+            )
+        )
         self._emit(
             events,
             TaskEventType.WORKSPACE_PREPARED,
@@ -406,6 +432,7 @@ class VeraHarness:
 
         policy = build_prompt_policy(
             task,
+            assistant_identity=assistant_identity,
             owner_profile=self._config.owner_profile,
             owner_profile_facts=self._owner_profile_facts_for_task(task),
         )
@@ -420,6 +447,7 @@ class VeraHarness:
                 "policy_lines": len(policy.summary_lines),
                 "owner_profile_applied": policy.owner_profile is not None
                 or bool(policy.owner_profile_facts),
+                "assistant_identity_name": assistant_identity.safe_display_name,
                 "session_identity": _session_identity(task, self._config.owner_profile),
             },
         )
@@ -648,6 +676,24 @@ class VeraHarness:
 
         for task in intake.queue.drain():
             update_id = task_update_ids.get(task.task_id)
+            assistant_identity_response = self._assistant_identity.handle(
+                task,
+                allow_profile_update=self._owner_identity_commands_allowed(task),
+            )
+            if assistant_identity_response is not None:
+                intake.send_chat_response(task, assistant_identity_response)
+                responses.append(
+                    TelegramChatResponseDelivery(
+                        update_id=update_id,
+                        session_id="assistant_identity:{}".format(task.task_id),
+                        task_id=task.task_id,
+                        chat_id=task.chat_id,
+                        message_id=task.message_id,
+                        text=assistant_identity_response,
+                        status=TelegramTaskStatus.COMPLETED,
+                    )
+                )
+                continue
             identity_response = (
                 self._identity.handle(task)
                 if self._owner_identity_commands_allowed(task)
@@ -713,6 +759,7 @@ class VeraHarness:
         session = self._chat_store.get_or_create(task)
         events: List[TaskEvent] = []
         runtime = self._chat_runtimes.get(session.session_id)
+        assistant_identity = self._assistant_identity.active_identity()
 
         workspace = self._workspaces.prepare_workspace_for_id(
             session.session_id,
@@ -727,7 +774,13 @@ class VeraHarness:
             "reused": workspace.reused,
             "reuse_policy": workspace.reuse_policy.value,
         }
-        workspace_payload.update(_telegram_identity_payload(task, self._config.owner_profile))
+        workspace_payload.update(
+            _telegram_identity_payload(
+                task,
+                self._config.owner_profile,
+                assistant_identity,
+            )
+        )
         self._emit_session_event(
             events,
             TaskEventType.WORKSPACE_PREPARED,
@@ -751,10 +804,15 @@ class VeraHarness:
             self._chat_runtimes[session.session_id] = runtime
 
         owner_profile_facts = self._owner_profile_facts_for_task(task)
-        prompt = render_chat_prompt_with_profile(task.text, owner_profile_facts)
+        prompt = render_chat_prompt_with_profile(
+            task.text,
+            owner_profile_facts,
+            assistant_identity=assistant_identity,
+        )
         if session.turns_completed == 0 and session.thread_id is None and runtime.pending_request is None:
             policy = build_prompt_policy(
                 task,
+                assistant_identity=assistant_identity,
                 owner_profile=self._config.owner_profile,
                 owner_profile_facts=owner_profile_facts,
             )
@@ -769,6 +827,7 @@ class VeraHarness:
                     "policy_lines": len(policy.summary_lines),
                     "owner_profile_applied": policy.owner_profile is not None
                     or bool(policy.owner_profile_facts),
+                    "assistant_identity_name": assistant_identity.safe_display_name,
                     "session_identity": _session_identity(task, self._config.owner_profile),
                 },
             )
@@ -1240,11 +1299,13 @@ def format_telegram_chat_loop(
 def _telegram_identity_payload(
     task: TelegramTask,
     owner_profile: Optional[OwnerProfile],
+    assistant_identity: AssistantIdentity,
 ) -> dict[str, object]:
     identity = _session_identity(task, owner_profile)
     payload: dict[str, object] = {
         "telegram_chat_id": task.chat_id,
         "telegram_user_id": task.user_id,
+        "assistant_identity_name": assistant_identity.safe_display_name,
         "session_identity": identity,
         "session_identity_label": "authorized Telegram user_id {}".format(task.user_id),
     }

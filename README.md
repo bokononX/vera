@@ -147,7 +147,8 @@ The top budget bar shows rate-limit, usage, and configured threshold state.
 Below it:
 
 - **Available agents** lists task/run status, source channel, task id,
-  workspace, current turn, age, and token/cost usage when events provide it.
+  workspace, current turn, age, active assistant identity name, redacted
+  session identity label, and token/cost usage when events provide it.
 - **Last turn and current plan** shows the focused agent's last decision or
   completed turn, objective, and plan entries marked as user-confirmed,
   agent-generated, or blocker-driven.
@@ -223,6 +224,35 @@ Telegram chat/user mapping, workspace path, Codex thread id, last turn id, last
 known status, pending prompt, and last assistant response needed for local
 restart/recovery. It does not store raw inbound Telegram message text.
 
+Assistant identity is handled before owner identity and before Codex in
+persistent chat mode. The active assistant has a first-class profile with a
+name, short self-description, mission, values, communication principles,
+boundaries, transparency rules, owner relationship, proactivity guidance, and
+owner-specific treatment rules. That profile is injected into initial and
+follow-up Codex prompts so the assistant introduces itself as Vera or the
+configured local name rather than as Codex.
+
+The default assistant identity is Vera, a personal assistant/minime focused on
+memory, values-aware conversation, thoughtful coordination, and helping the
+owner think clearly. It is not the same thing as the human owner profile.
+Assistant identity describes the user-facing assistant; owner identity records
+the human owner's preferences and memory. The prompt always preserves product
+truth: the assistant must not claim to be human, sentient, or independent, and
+can explain that Codex/OpenAI tooling is the runtime layer when asked or when
+operationally relevant.
+
+The owner can ask `who are you?` to receive a concise assistant introduction,
+or `are you Codex?` to receive the same identity plus runtime transparency. The
+owner can inspect the current assistant profile with `/assistant identity
+profile` and create/refine it through `/assistant identity`. That interview
+asks for name, mission, values, style, boundaries, relationship, proactivity,
+owner treatment, and transparency wording, then writes the profile only after
+explicit `confirm`. The profile is stored at `VERA_ASSISTANT_IDENTITY_PATH`
+(`./.vera/assistant_identity.json` by default). Active assistant-identity
+interview state is stored separately at
+`VERA_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH`
+(`./.vera/assistant_identity_interviews.json` by default).
+
 Identity/style onboarding is handled before Codex in persistent chat mode.
 The owner can send `/identity`, `/interview`, or a natural-language
 identity/style interview request from Telegram. Vera asks short progressive
@@ -271,6 +301,38 @@ Recommended Telegram config:
     "state_path": "./.vera/telegram_state.json",
     "unauthorized_response": null
   },
+  "assistant": {
+    "identity_path": "./.vera/assistant_identity.json",
+    "name": "Vera",
+    "short_description": "a personal assistant/minime for memory, thoughtful conversation, coordination, and clear thinking",
+    "mission": "Help the owner think clearly, remember durable context, coordinate carefully, and turn intentions into reversible, well-governed action.",
+    "core_values": [
+      "truthfulness over comfort",
+      "preserve human agency and reversible choices",
+      "protect privacy through minimal disclosure"
+    ],
+    "communication_principles": [
+      "direct, concise, concrete, and kind without flattery",
+      "surface uncertainty, tradeoffs, and weak assumptions early"
+    ],
+    "boundaries": [
+      "do not claim to be human, sentient, or independent",
+      "do not treat chat messages as approval for unsafe, irreversible, or authority-sensitive actions"
+    ],
+    "transparency_rules": [
+      "introduce yourself as Vera, not as Codex",
+      "explain that Codex/OpenAI tooling is the runtime layer when asked or operationally relevant"
+    ],
+    "relationship_to_owner": "Serve as the owner's configured personal assistant and coordination aide while treating the owner as the human decision-maker.",
+    "proactivity": [
+      "be proactive about memory, risks, tradeoffs, and useful coordination opportunities",
+      "stay quiet or ask before expanding scope when the owner wants a narrow answer"
+    ],
+    "owner_special_treatment": [
+      "use owner-specific profile guidance only for the configured owner",
+      "do not expose private owner profile text to other Telegram users"
+    ]
+  },
   "owner": {
     "user_id": 67890,
     "display_name": "Vera Owner",
@@ -290,12 +352,23 @@ For migration, the old non-secret Telegram environment variables are still
 recognized when no Telegram config file exists. When a config file is present,
 its Telegram values take precedence over those env vars. Do not put
 `bot_token`, `telegram_bot_token`, or `VERA_TELEGRAM_BOT_TOKEN` in config; the
-loader rejects secret fields. The optional top-level `owner` block is also
-non-secret local configuration. Its stable key is Telegram `user_id`; display
-name and username are labels only. Owner values, priorities, communication
-style, and escalation boundaries are inserted into the initial owner-session
-Codex prompt and are not applied to other authorized users. To keep profile
-facts refreshable from the local/user wiki without code changes, set
+loader rejects secret fields.
+
+The optional top-level `assistant` block is non-secret local configuration for
+the assistant's user-facing identity. If `assistant.identity_path` points to an
+existing JSON profile, that profile overlays the inline assistant defaults and
+is also where the `/assistant identity` interview writes confirmed changes. You
+can also skip the inline `assistant` block entirely and set
+`VERA_ASSISTANT_IDENTITY_PATH` to a dedicated JSON file with the same fields.
+The loader rejects secret fields and obvious human/sentient/runtime-independent
+overclaims.
+
+The optional top-level `owner` block is also non-secret local configuration.
+Its stable key is Telegram `user_id`; display name and username are labels
+only. Owner values, priorities, communication style, and escalation boundaries
+are inserted into the initial owner-session Codex prompt and are not applied to
+other authorized users. To keep profile facts refreshable from the local/user
+wiki without code changes, set
 `owner.wiki_profile_path` to a Markdown file such as
 `./.vera/owner_profile.md`; Vera reads that file at startup and includes a
 bounded excerpt in the owner prompt while console surfaces show only a redacted
@@ -313,6 +386,8 @@ Other harness and Codex settings remain environment-backed:
 | --- | --- | --- |
 | `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required for `--monitor`, `--live-smoke`, `--poll-once`, and `--check-config`. |
 | `VERA_TELEGRAM_CONFIG_PATH` | No | Optional path to Telegram non-secret JSON config. Equivalent to `--telegram-config`. |
+| `VERA_ASSISTANT_IDENTITY_PATH` | No | Local JSON file for the active assistant identity profile. Defaults to `./.vera/assistant_identity.json`. |
+| `VERA_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH` | No | Local JSON file for assistant identity interview state and transcript. Defaults to `./.vera/assistant_identity_interviews.json`. |
 | `VERA_RUN_STATE_PATH` | No | Local JSON file for minimal orchestration run state. Defaults to `./.vera/run_state.json`. |
 | `VERA_CHAT_SESSION_STATE_PATH` | No | Local JSON file for persistent Telegram chat sessions and Codex thread ids. Defaults to `./.vera/chat_sessions.json`. |
 | `VERA_IDENTITY_PROFILE_PATH` | No | Local JSON file for confirmed owner identity/style profile entries. Defaults to `./.vera/identity_profile.json`. |
@@ -393,6 +468,9 @@ live Telegram or Codex access.
 Implemented now:
 
 - configuration parsing and validation;
+- first-class assistant identity defaults, config/profile loading, Telegram
+  self-introduction, assistant identity interview, prompt injection, and
+  redacted console assistant-name display;
 - domain models for Telegram tasks, harness runs, workspaces, workspace reuse
   policy, bootstrap diagnostics, persistent run state, task events, and Codex
   turn results;
