@@ -18,6 +18,7 @@ class PromptPolicy:
     operating_limits: Tuple[str, ...]
     status_contract: Tuple[str, ...]
     owner_profile: Optional[OwnerProfile]
+    owner_profile_facts: Tuple[str, ...] = ()
 
     @property
     def summary_lines(self) -> Tuple[str, ...]:
@@ -31,25 +32,33 @@ class PromptPolicy:
 
     @property
     def owner_profile_summary_lines(self) -> Tuple[str, ...]:
-        if self.owner_profile is None:
-            return ()
-        owner = self.owner_profile
-        lines = [
-            "Owner profile applies to primary owner Telegram user_id {}.".format(
-                owner.user_id
-            ),
-            "Owner identity label: {}.".format(owner.display_label(self.task.username)),
-        ]
-        if owner.communication_style:
+        lines = []
+        if self.owner_profile is not None:
+            owner = self.owner_profile
+            lines.extend(
+                [
+                    "Owner profile applies to primary owner Telegram user_id {}.".format(
+                        owner.user_id
+                    ),
+                    "Owner identity label: {}.".format(owner.display_label(self.task.username)),
+                ]
+            )
+            if owner.communication_style:
+                lines.append(
+                    "Owner communication style preferences configured: {}.".format(
+                        len(owner.communication_style)
+                    )
+                )
+            if owner.wiki_profile_path is not None:
+                lines.append("Refreshable owner profile source: {}".format(owner.wiki_profile_path))
+            if owner.wiki_profile_excerpt:
+                lines.append("Refreshable owner profile facts: <redacted owner profile>.")
+        if self.owner_profile_facts:
             lines.append(
-                "Owner communication style preferences configured: {}.".format(
-                    len(owner.communication_style)
+                "Confirmed owner profile guidance configured: {} redacted entries.".format(
+                    len(self.owner_profile_facts)
                 )
             )
-        if owner.wiki_profile_path is not None:
-            lines.append("Refreshable owner profile source: {}.".format(owner.wiki_profile_path))
-        if owner.wiki_profile_excerpt:
-            lines.append("Refreshable owner profile facts: <redacted owner profile>.")
         return tuple(lines)
 
     @property
@@ -95,6 +104,9 @@ class PromptPolicy:
         if self.owner_profile_lines:
             sections.extend(["", "Owner relationship:"])
             sections.extend("- {}".format(item) for item in self.owner_profile_lines)
+        if self.owner_profile_facts:
+            sections.extend(["", "Confirmed owner profile guidance:"])
+            sections.extend("- {}".format(item) for item in self.owner_profile_facts)
         sections.extend(["", "CAT-131 operating principles:"])
         sections.extend("- {}".format(item) for item in self.cat_131_principles)
         sections.extend(["", "Operating limits:"])
@@ -115,8 +127,14 @@ class PromptPolicy:
 def build_prompt_policy(
     task: TelegramTask,
     owner_profile: Optional[OwnerProfile] = None,
+    owner_profile_facts: Tuple[str, ...] = (),
 ) -> PromptPolicy:
     session_owner_profile = owner_profile if owner_profile and owner_profile.matches(task) else None
+    session_owner_profile_facts = (
+        owner_profile_facts
+        if session_owner_profile is not None or owner_profile is None
+        else ()
+    )
     return PromptPolicy(
         task=task,
         identity_constraints=(
@@ -145,6 +163,7 @@ def build_prompt_policy(
             "Use `failed` when the task cannot be completed after the available retries or a non-recoverable runtime error.",
         ),
         owner_profile=session_owner_profile,
+        owner_profile_facts=session_owner_profile_facts,
     )
 
 

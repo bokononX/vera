@@ -21,6 +21,8 @@ class HarnessConfigTests(unittest.TestCase):
                     "VERA_TELEGRAM_UNAUTHORIZED_RESPONSE": "This chat is not authorized.",
                     "VERA_RUN_STATE_PATH": str(Path(temp_dir, "run-state.json")),
                     "VERA_CHAT_SESSION_STATE_PATH": str(Path(temp_dir, "chat-sessions.json")),
+                    "VERA_IDENTITY_PROFILE_PATH": str(Path(temp_dir, "identity-profile.json")),
+                    "VERA_IDENTITY_INTERVIEW_STATE_PATH": str(Path(temp_dir, "identity-interviews.json")),
                     "VERA_WORKSPACE_ROOT": temp_dir,
                     "VERA_CODEX_APP_SERVER_COMMAND": "codex app-server --port 0",
                     "VERA_MAX_TURNS": "7",
@@ -49,6 +51,8 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertIsNone(config.owner_profile)
         self.assertEqual(config.run_state_path, Path(temp_dir, "run-state.json").resolve())
         self.assertEqual(config.chat_session_state_path, Path(temp_dir, "chat-sessions.json").resolve())
+        self.assertEqual(config.identity_profile_path, Path(temp_dir, "identity-profile.json").resolve())
+        self.assertEqual(config.identity_interview_state_path, Path(temp_dir, "identity-interviews.json").resolve())
         self.assertEqual(config.workspace_root, Path(temp_dir).resolve())
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server", "--port", "0"))
         self.assertEqual(config.max_turns, 7)
@@ -78,6 +82,8 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertIsNone(config.owner_profile)
         self.assertEqual(config.run_state_path.name, "run_state.json")
         self.assertEqual(config.chat_session_state_path.name, "chat_sessions.json")
+        self.assertEqual(config.identity_profile_path.name, "identity_profile.json")
+        self.assertEqual(config.identity_interview_state_path.name, "identity_interviews.json")
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server"))
         self.assertEqual(config.max_retries, 1)
         self.assertEqual(config.workspace_bootstrap_timeout_seconds, 300)

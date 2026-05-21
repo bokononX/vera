@@ -262,6 +262,8 @@ def _format_config_check(config: HarnessConfig) -> str:
             "owner_identity: {}".format(_format_owner_identity(config)),
             "owner_profile_source: {}".format(_format_owner_profile_source(config)),
             "chat_session_state_path: {}".format(config.chat_session_state_path),
+            "identity_profile_path: {}".format(config.identity_profile_path),
+            "identity_interview_state_path: {}".format(config.identity_interview_state_path),
             "event_log_path: {}".format(config.event_log_path),
             "budget_snapshot_path: {}".format(config.budget_snapshot_path or "<not configured>"),
             "monthly_budget_usd: {}".format(_display_optional_config(config.monthly_budget_usd)),
@@ -496,6 +498,8 @@ def _console_monitor_details(config: HarnessConfig) -> Mapping[str, object]:
         "event_log_path": str(config.event_log_path),
         "telegram_state_path": str(config.telegram_state_path),
         "chat_session_state_path": str(config.chat_session_state_path),
+        "identity_profile_path": str(config.identity_profile_path),
+        "identity_interview_state_path": str(config.identity_interview_state_path),
         "codex_app_server_command": config.codex_app_server_command.display,
     }
 
