@@ -26,6 +26,7 @@ from .models import (
     HarnessRun,
     HarnessRunStatus,
     OrchestrationDecision,
+    OwnerProfile,
     RunState,
     TaskEvent,
     TaskEventType,
@@ -368,21 +369,23 @@ class VeraHarness:
             )
         )
         harness_run = replace(harness_run, workspace=workspace, status=HarnessRunStatus.RUNNING)
+        workspace_payload = {
+            "workspace_path": str(workspace.path),
+            "created": workspace.created,
+            "reused": workspace.reused,
+            "reuse_policy": workspace.reuse_policy.value,
+        }
+        workspace_payload.update(_telegram_identity_payload(task, self._config.owner_profile))
         self._emit(
             events,
             TaskEventType.WORKSPACE_PREPARED,
             task,
             state.run_id,
             status=workspace.bootstrap_status.value,
-            payload={
-                "workspace_path": str(workspace.path),
-                "created": workspace.created,
-                "reused": workspace.reused,
-                "reuse_policy": workspace.reuse_policy.value,
-            },
+            payload=workspace_payload,
         )
 
-        policy = build_prompt_policy(task)
+        policy = build_prompt_policy(task, owner_profile=self._config.owner_profile)
         prompt = policy.render_prompt()
         invocation = self._planner.plan(workspace, prompt)
         self._emit(
@@ -390,7 +393,11 @@ class VeraHarness:
             TaskEventType.PROMPT_BUILT,
             task,
             state.run_id,
-            payload={"policy_lines": len(policy.summary_lines)},
+            payload={
+                "policy_lines": len(policy.summary_lines),
+                "owner_profile_applied": policy.owner_profile is not None,
+                "session_identity": _session_identity(task, self._config.owner_profile),
+            },
         )
 
         retry_count = 0
@@ -671,20 +678,20 @@ class VeraHarness:
             create=create_workspace,
             run_bootstrap=run_bootstrap,
         )
+        workspace_payload = {
+            "workspace_path": str(workspace.path),
+            "created": workspace.created,
+            "reused": workspace.reused,
+            "reuse_policy": workspace.reuse_policy.value,
+        }
+        workspace_payload.update(_telegram_identity_payload(task, self._config.owner_profile))
         self._emit_session_event(
             events,
             TaskEventType.WORKSPACE_PREPARED,
             session.session_id,
             session.session_id,
             status=workspace.bootstrap_status.value,
-            payload={
-                "workspace_path": str(workspace.path),
-                "created": workspace.created,
-                "reused": workspace.reused,
-                "reuse_policy": workspace.reuse_policy.value,
-                "telegram_chat_id": task.chat_id,
-                "telegram_user_id": task.user_id,
-            },
+            payload=workspace_payload,
         )
         session = self._chat_store.save(
             replace(
@@ -702,13 +709,19 @@ class VeraHarness:
 
         prompt = task.text
         if session.turns_completed == 0 and session.thread_id is None and runtime.pending_request is None:
-            prompt = build_prompt_policy(task).render_prompt()
+            policy = build_prompt_policy(task, owner_profile=self._config.owner_profile)
+            prompt = policy.render_prompt()
             self._emit_session_event(
                 events,
                 TaskEventType.PROMPT_BUILT,
                 session.session_id,
                 session.session_id,
-                payload={"policy": "initial_chat_prompt"},
+                payload={
+                    "policy": "initial_chat_prompt",
+                    "policy_lines": len(policy.summary_lines),
+                    "owner_profile_applied": policy.owner_profile is not None,
+                    "session_identity": _session_identity(task, self._config.owner_profile),
+                },
             )
 
         invocation = self._planner.plan(workspace, prompt)
@@ -1173,6 +1186,38 @@ def format_telegram_chat_loop(
             ]
         )
     return "\n".join(lines)
+
+
+def _telegram_identity_payload(
+    task: TelegramTask,
+    owner_profile: Optional[OwnerProfile],
+) -> dict[str, object]:
+    identity = _session_identity(task, owner_profile)
+    payload: dict[str, object] = {
+        "telegram_chat_id": task.chat_id,
+        "telegram_user_id": task.user_id,
+        "session_identity": identity,
+        "session_identity_label": "authorized Telegram user_id {}".format(task.user_id),
+    }
+    if owner_profile is not None and owner_profile.matches(task):
+        payload["session_identity_label"] = owner_profile.redacted_identity_label(
+            fallback_username=task.username
+        )
+        payload["owner_profile"] = (
+            "<redacted owner profile>"
+            if owner_profile.has_profile_content
+            else "<owner profile empty>"
+        )
+    return payload
+
+
+def _session_identity(
+    task: TelegramTask,
+    owner_profile: Optional[OwnerProfile],
+) -> str:
+    if owner_profile is not None and owner_profile.matches(task):
+        return "owner"
+    return "authorized_user"
 
 
 def _telegram_status_for_result(

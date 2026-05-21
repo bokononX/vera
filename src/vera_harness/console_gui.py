@@ -370,6 +370,7 @@ _HTML = """<!doctype html>
           <span class="status ${esc(agent.status)}">${esc(agent.status)}</span>
           <span class="meta">${esc(agent.source_channel)} turn ${esc(agent.current_turn)} age ${age(agent.age_seconds)}</span>
           <span class="meta">${esc(agent.token_usage ?? "unknown")} tok / $${money(agent.budget_usd)}</span>
+          <span class="meta" style="grid-column: 1 / -1">identity ${esc(agent.session_identity_label ?? "unknown session identity")}</span>
           <span class="meta" style="grid-column: 1 / -1">${esc(agent.workspace_path ?? "unknown workspace")}</span>
         </button>`).join("") : `<p class="empty">none</p>`;
       document.querySelectorAll(".agent").forEach((button) => {

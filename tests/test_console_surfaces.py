@@ -25,8 +25,10 @@ class ConsoleSurfaceTests(unittest.TestCase):
         self.assertIn("Available agents", frame)
         self.assertIn("Last turn and current plan", frame)
         self.assertIn("Agent log stream", frame)
+        self.assertIn("primary owner: Vera Owner", frame)
         self.assertIn("<redacted private message>", frame)
         self.assertNotIn("sk-live-secret", frame)
+        self.assertNotIn("Raw owner values", frame)
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

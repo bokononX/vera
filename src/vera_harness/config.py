@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
 
+from .models import OwnerProfile
+
 
 class ConfigError(ValueError):
     """Raised when harness configuration is invalid."""
@@ -81,6 +83,7 @@ class HarnessConfig:
     telegram_request_timeout_seconds: int
     telegram_state_path: Path
     telegram_unauthorized_response: Optional[str]
+    owner_profile: Optional[OwnerProfile]
     run_state_path: Path
     chat_session_state_path: Path
     event_log_path: Path
@@ -113,11 +116,14 @@ class HarnessConfig:
         path_text = telegram_config_path or _optional_text(source.get("VERA_TELEGRAM_CONFIG_PATH"))
         explicit_path = path_text is not None
         config_path = Path(path_text or DEFAULT_TELEGRAM_CONFIG_PATH).expanduser().resolve()
-        telegram_config = _load_telegram_config(config_path, explicit_path)
+        local_config = _load_local_config(config_path, explicit_path)
+        telegram_config = _telegram_config_from_local(local_config)
+        owner_config = _owner_config_from_local(local_config)
         return cls.from_env(
             source,
             require_secrets=require_secrets,
             telegram_config=telegram_config,
+            owner_config=owner_config,
         )
 
     @classmethod
@@ -126,9 +132,11 @@ class HarnessConfig:
         env: Optional[Mapping[str, str]] = None,
         require_secrets: bool = True,
         telegram_config: Optional[Mapping[str, Any]] = None,
+        owner_config: Optional[Mapping[str, Any]] = None,
     ) -> "HarnessConfig":
         source = os.environ if env is None else env
         telegram_source = telegram_config or {}
+        owner_profile = _parse_owner_profile(owner_config)
         telegram_bot_token = _optional_text(source.get("VERA_TELEGRAM_BOT_TOKEN"))
         allowed_chat_ids = _parse_int_list(
             _setting_value(
@@ -283,6 +291,7 @@ class HarnessConfig:
             telegram_request_timeout_seconds=telegram_request_timeout_seconds,
             telegram_state_path=telegram_state_path,
             telegram_unauthorized_response=telegram_unauthorized_response,
+            owner_profile=owner_profile,
             run_state_path=run_state_path,
             chat_session_state_path=chat_session_state_path,
             event_log_path=event_log_path,
@@ -402,7 +411,7 @@ def _parse_optional_string(value: Any, field_name: str) -> Optional[str]:
     return _optional_text(value)
 
 
-def _load_telegram_config(config_path: Path, explicit_path: bool) -> Mapping[str, Any]:
+def _load_local_config(config_path: Path, explicit_path: bool) -> Mapping[str, Any]:
     if not config_path.exists():
         if explicit_path:
             raise ConfigError("Telegram config file does not exist: {}".format(config_path))
@@ -417,9 +426,15 @@ def _load_telegram_config(config_path: Path, explicit_path: bool) -> Mapping[str
         raise ConfigError("Telegram config file is not valid JSON: {}".format(exc))
     if not isinstance(loaded, dict):
         raise ConfigError("Telegram config file must contain a JSON object")
-    if "telegram" not in loaded:
+    return loaded
+
+
+def _telegram_config_from_local(local_config: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not local_config:
+        return {}
+    if "telegram" not in local_config:
         raise ConfigError("Telegram config file must contain a 'telegram' object")
-    telegram_config = loaded["telegram"]
+    telegram_config = local_config["telegram"]
     if not isinstance(telegram_config, dict):
         raise ConfigError("telegram must be a JSON object")
     forbidden = {"bot_token", "telegram_bot_token", "VERA_TELEGRAM_BOT_TOKEN"}
@@ -443,6 +458,115 @@ def _load_telegram_config(config_path: Path, explicit_path: bool) -> Mapping[str
     if unknown:
         raise ConfigError("Telegram config contains unknown fields: {}".format(", ".join(unknown)))
     return telegram_config
+
+
+def _owner_config_from_local(local_config: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    if not local_config or "owner" not in local_config:
+        return None
+    owner_config = local_config["owner"]
+    if not isinstance(owner_config, dict):
+        raise ConfigError("owner must be a JSON object")
+    forbidden = {
+        "api_key",
+        "bot_token",
+        "password",
+        "secret",
+        "telegram_bot_token",
+        "token",
+        "VERA_TELEGRAM_BOT_TOKEN",
+    }
+    present_forbidden = sorted(forbidden.intersection(owner_config.keys()))
+    if present_forbidden:
+        raise ConfigError(
+            "Owner config must not contain secret fields: {}".format(
+                ", ".join(present_forbidden)
+            )
+        )
+    allowed = {
+        "user_id",
+        "display_name",
+        "username",
+        "role",
+        "values",
+        "priorities",
+        "communication_style",
+        "escalation_boundaries",
+        "wiki_profile_path",
+    }
+    unknown = sorted(set(owner_config.keys()) - allowed)
+    if unknown:
+        raise ConfigError("Owner config contains unknown fields: {}".format(", ".join(unknown)))
+    return owner_config
+
+
+def _parse_owner_profile(owner_config: Optional[Mapping[str, Any]]) -> Optional[OwnerProfile]:
+    if owner_config is None:
+        return None
+    user_id = owner_config.get("user_id")
+    if isinstance(user_id, bool) or not isinstance(user_id, int):
+        raise ConfigError("owner.user_id must be an integer")
+    wiki_profile_path = _parse_optional_path(
+        owner_config.get("wiki_profile_path"),
+        "owner.wiki_profile_path",
+    )
+    return OwnerProfile(
+        user_id=user_id,
+        display_name=_parse_optional_string(
+            owner_config.get("display_name"),
+            "owner.display_name",
+        ),
+        username=_parse_optional_string(owner_config.get("username"), "owner.username"),
+        role=_parse_optional_string(owner_config.get("role"), "owner.role"),
+        values=_parse_string_tuple(owner_config.get("values"), "owner.values"),
+        priorities=_parse_string_tuple(owner_config.get("priorities"), "owner.priorities"),
+        communication_style=_parse_string_tuple(
+            owner_config.get("communication_style"),
+            "owner.communication_style",
+        ),
+        escalation_boundaries=_parse_string_tuple(
+            owner_config.get("escalation_boundaries"),
+            "owner.escalation_boundaries",
+        ),
+        wiki_profile_path=wiki_profile_path,
+        wiki_profile_excerpt=_load_owner_profile_excerpt(wiki_profile_path),
+    )
+
+
+def _parse_string_tuple(value: Any, field_name: str) -> Tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        text = value.strip()
+        return (text,) if text else ()
+    if not isinstance(value, (list, tuple)):
+        raise ConfigError("{} must be a string or an array of strings".format(field_name))
+    parsed = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ConfigError("{} must contain only strings".format(field_name))
+        text = item.strip()
+        if text:
+            parsed.append(text)
+    return tuple(parsed)
+
+
+def _load_owner_profile_excerpt(path: Optional[Path], max_chars: int = 2000) -> Optional[str]:
+    if path is None:
+        return None
+    if not path.exists():
+        raise ConfigError("owner.wiki_profile_path does not exist: {}".format(path))
+    if not path.is_file():
+        raise ConfigError("owner.wiki_profile_path must be a file: {}".format(path))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError("owner.wiki_profile_path cannot be read: {}".format(exc))
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) <= max_chars:
+        return text
+    return "{}\n[truncated to {} characters]".format(text[:max_chars].rstrip(), max_chars)
 
 
 def _setting_value(

@@ -390,6 +390,70 @@ class TelegramChatSessionTests(unittest.TestCase):
             self.assertIn("thread-1", state)
             self.assertIn("telegram-chat-100-user-200", state)
 
+    def test_owner_chat_session_receives_owner_profile_prompt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200,201",
+                },
+                owner_config={
+                    "user_id": 200,
+                    "display_name": "Vera Owner",
+                    "communication_style": ["direct and concrete"],
+                    "escalation_boundaries": ["require approval before irreversible actions"],
+                },
+            )
+            runtime = ScriptedChatRuntime(("Owner-shaped response.",))
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: runtime)
+
+            session, run_result = harness.run_chat_turn(
+                TelegramTask.from_message(
+                    chat_id=100,
+                    user_id=200,
+                    message_id=300,
+                    text="hello",
+                ),
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(run_result.assistant_response, "Owner-shaped response.")
+            self.assertEqual(session.session_id, "telegram-chat-100-user-200")
+            self.assertIn("Owner relationship:", runtime.prompts[0])
+            self.assertIn("direct and concrete", runtime.prompts[0])
+            self.assertIn("not an authorization override", runtime.prompts[0])
+
+    def test_authorized_non_owner_chat_session_uses_fallback_prompt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200,201",
+                },
+                owner_config={
+                    "user_id": 200,
+                    "display_name": "Vera Owner",
+                    "communication_style": ["direct and concrete"],
+                },
+            )
+            runtime = ScriptedChatRuntime(("Plain response.",))
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: runtime)
+
+            harness.run_chat_turn(
+                TelegramTask.from_message(
+                    chat_id=100,
+                    user_id=201,
+                    message_id=300,
+                    text="hello",
+                ),
+                run_bootstrap=False,
+            )
+
+            self.assertNotIn("Owner relationship:", runtime.prompts[0])
+            self.assertNotIn("direct and concrete", runtime.prompts[0])
+
     def test_chat_poll_codex_launch_failure_does_not_send_lifecycle_acceptance(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = _config(
@@ -491,7 +555,7 @@ class ScriptedChatRuntime:
         pass
 
 
-def _config(temp_dir, extra_env=None):
+def _config(temp_dir, extra_env=None, owner_config=None):
     env = {
         "VERA_WORKSPACE_ROOT": temp_dir,
         "VERA_RUN_STATE_PATH": str(Path(temp_dir, "run-state.json")),
@@ -501,7 +565,7 @@ def _config(temp_dir, extra_env=None):
     }
     if extra_env:
         env.update(extra_env)
-    return HarnessConfig.from_env(env, require_secrets=False)
+    return HarnessConfig.from_env(env, require_secrets=False, owner_config=owner_config)
 
 
 def _task():

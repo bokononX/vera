@@ -22,10 +22,16 @@ runtime execution explicit:
 - **Telegram configuration:** keeps non-secret connectivity settings in a
   local JSON config file while leaving the bot token in an environment-backed
   secret path.
+- **Owner identity and profile:** optionally records one primary owner in the
+  same non-secret local config, keyed by stable Telegram `user_id` with display
+  labels, values, priorities, communication style, escalation boundaries, and
+  an optional refreshable local/wiki profile file.
 - **Policy prompt:** encodes Herald's role as a faithful representative,
   The Place's coordination protocols, and Vera's trust constraints, including
   onion peeling, interest surfacing, face-saving, minimal disclosure,
   non-sycophancy, reversibility, evidence, uncertainty, and explicit blockers.
+  Owner sessions receive an additional relationship block; authorized
+  non-owner sessions do not.
 - **Workspace management:** resolves local workspaces for either legacy tasks
   or persistent chat sessions, validates that paths cannot escape the configured
   workspace root, records compact workspace metadata, and exposes explicit
@@ -58,7 +64,9 @@ runtime execution explicit:
   consoles. The terminal console is operational by default for live local use:
   it owns a managed Telegram monitor loop unless explicitly launched in
   view-only mode, and it reports monitor startup/configuration failures through
-  the same event stream it renders.
+  the same event stream it renders. Console agent rows include the active
+  session identity label while keeping raw owner profile content redacted by
+  default.
 - **Smoke modes:** provides a no-secret fake Telegram-to-Codex path for local
   validation and a one-cycle live smoke path for configured Telegram bot plus
   local Codex app-server environments.
@@ -77,6 +85,15 @@ runtime execution explicit:
 - Non-secret Telegram connectivity settings should prefer the local config file
   interface over environment variables; env compatibility is only a migration
   fallback when no config file is present.
+- Owner identity is distinct from the Telegram allow-list: matching uses stable
+  Telegram `user_id`, and owner-specific prompt behavior must not apply to
+  other authorized users.
+- Owner profile facts are non-secret but personal; they may be loaded from
+  local config or a refreshable local/wiki file, should be bounded before
+  prompt insertion, and should be redacted from console summaries by default.
+- Owner authority is not an approval override. Unsafe, irreversible,
+  authority-sensitive, or high-stakes actions still require the configured
+  approval, sandbox, and escalation posture.
 - Telegram transport details should stay isolated from Codex and workspace
   planning.
 - The harness should collect and persist only the task or chat-session metadata

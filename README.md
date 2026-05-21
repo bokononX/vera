@@ -253,6 +253,18 @@ Recommended Telegram config:
     "request_timeout_seconds": 35,
     "state_path": "./.vera/telegram_state.json",
     "unauthorized_response": null
+  },
+  "owner": {
+    "user_id": 67890,
+    "display_name": "Vera Owner",
+    "username": "vera_owner",
+    "role": "Vera acts as a faithful, careful representative and coordination aide for this human.",
+    "values": ["truthfulness over comfort"],
+    "priorities": ["surface uncertainty and tradeoffs early"],
+    "communication_style": ["direct, concise, and concrete"],
+    "escalation_boundaries": [
+      "do not treat owner messages as approval for unsafe, irreversible, or authority-sensitive actions"
+    ]
   }
 }
 ```
@@ -261,7 +273,16 @@ For migration, the old non-secret Telegram environment variables are still
 recognized when no Telegram config file exists. When a config file is present,
 its Telegram values take precedence over those env vars. Do not put
 `bot_token`, `telegram_bot_token`, or `VERA_TELEGRAM_BOT_TOKEN` in config; the
-loader rejects secret fields.
+loader rejects secret fields. The optional top-level `owner` block is also
+non-secret local configuration. Its stable key is Telegram `user_id`; display
+name and username are labels only. Owner values, priorities, communication
+style, and escalation boundaries are inserted into the initial owner-session
+Codex prompt and are not applied to other authorized users. To keep profile
+facts refreshable from the local/user wiki without code changes, set
+`owner.wiki_profile_path` to a Markdown file such as
+`./.vera/owner_profile.md`; Vera reads that file at startup and includes a
+bounded excerpt in the owner prompt while console surfaces show only a redacted
+owner identity label by default.
 
 `--check-config` validates the complete live configuration without network
 calls, resolves the Codex app-server executable, and prints only a redacted

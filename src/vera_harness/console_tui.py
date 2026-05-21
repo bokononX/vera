@@ -68,6 +68,12 @@ def render_tui_frame(
                 usable_width,
             )
         )
+        lines.append(
+            _clip(
+                "  identity {}".format(agent.session_identity_label or "unknown session identity"),
+                usable_width,
+            )
+        )
 
     lines.extend(["", "Last turn and current plan"])
     if snapshot.focused is None:

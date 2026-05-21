@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
-from .models import TelegramTask
+from .models import OwnerProfile, TelegramTask
 
 
 @dataclass(frozen=True)
@@ -17,15 +17,69 @@ class PromptPolicy:
     cat_131_principles: Tuple[str, ...]
     operating_limits: Tuple[str, ...]
     status_contract: Tuple[str, ...]
+    owner_profile: Optional[OwnerProfile]
 
     @property
     def summary_lines(self) -> Tuple[str, ...]:
         return (
             self.identity_constraints
+            + self.owner_profile_summary_lines
             + self.cat_131_principles
             + self.operating_limits
             + self.status_contract
         )
+
+    @property
+    def owner_profile_summary_lines(self) -> Tuple[str, ...]:
+        if self.owner_profile is None:
+            return ()
+        owner = self.owner_profile
+        lines = [
+            "Owner profile applies to primary owner Telegram user_id {}.".format(
+                owner.user_id
+            ),
+            "Owner identity label: {}.".format(owner.display_label(self.task.username)),
+        ]
+        if owner.communication_style:
+            lines.append(
+                "Owner communication style preferences configured: {}.".format(
+                    len(owner.communication_style)
+                )
+            )
+        if owner.wiki_profile_path is not None:
+            lines.append("Refreshable owner profile source: {}.".format(owner.wiki_profile_path))
+        if owner.wiki_profile_excerpt:
+            lines.append("Refreshable owner profile facts: <redacted owner profile>.")
+        return tuple(lines)
+
+    @property
+    def owner_profile_lines(self) -> Tuple[str, ...]:
+        if self.owner_profile is None:
+            return ()
+        owner = self.owner_profile
+        lines = [
+            "Primary owner Telegram user_id: {}".format(owner.user_id),
+            "Human identity label: {}".format(owner.display_label(self.task.username)),
+            "Vera's role for the owner: {}".format(
+                owner.role
+                or "act as a faithful, careful representative and coordination aide for the owner"
+            ),
+            "Owner identity is relationship context, not an authorization override; safety, truthfulness, governance, and explicit approval boundaries still apply.",
+        ]
+        lines.extend(_prefixed_lines("Values to respect", owner.values))
+        lines.extend(_prefixed_lines("Current priorities", owner.priorities))
+        lines.extend(_prefixed_lines("Communication style preferences", owner.communication_style))
+        lines.extend(_prefixed_lines("Escalation/refusal boundaries", owner.escalation_boundaries))
+        if owner.wiki_profile_path is not None:
+            lines.append("Refreshable profile source: {}".format(owner.wiki_profile_path))
+        if owner.wiki_profile_excerpt:
+            lines.append("Refreshable owner profile facts:")
+            lines.extend(
+                "  {}".format(line)
+                for line in owner.wiki_profile_excerpt.splitlines()
+                if line.strip()
+            )
+        return tuple(lines)
 
     def render_prompt(self) -> str:
         sections = [
@@ -38,6 +92,9 @@ class PromptPolicy:
             "Identity constraints:",
         ]
         sections.extend("- {}".format(item) for item in self.identity_constraints)
+        if self.owner_profile_lines:
+            sections.extend(["", "Owner relationship:"])
+            sections.extend("- {}".format(item) for item in self.owner_profile_lines)
         sections.extend(["", "CAT-131 operating principles:"])
         sections.extend("- {}".format(item) for item in self.cat_131_principles)
         sections.extend(["", "Operating limits:"])
@@ -55,7 +112,11 @@ class PromptPolicy:
         return "\n".join(sections)
 
 
-def build_prompt_policy(task: TelegramTask) -> PromptPolicy:
+def build_prompt_policy(
+    task: TelegramTask,
+    owner_profile: Optional[OwnerProfile] = None,
+) -> PromptPolicy:
+    session_owner_profile = owner_profile if owner_profile and owner_profile.matches(task) else None
     return PromptPolicy(
         task=task,
         identity_constraints=(
@@ -83,4 +144,9 @@ def build_prompt_policy(task: TelegramTask) -> PromptPolicy:
             "Use `blocked` when human approval, missing task input, external authority, or high-stakes risk prevents safe progress.",
             "Use `failed` when the task cannot be completed after the available retries or a non-recoverable runtime error.",
         ),
+        owner_profile=session_owner_profile,
     )
+
+
+def _prefixed_lines(prefix: str, values: Tuple[str, ...]) -> Tuple[str, ...]:
+    return tuple("{}: {}".format(prefix, value) for value in values)

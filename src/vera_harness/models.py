@@ -124,6 +124,55 @@ class TelegramTask:
 
 
 @dataclass(frozen=True)
+class OwnerProfile:
+    """Non-secret owner identity and values profile loaded from local config."""
+
+    user_id: int
+    display_name: Optional[str] = None
+    username: Optional[str] = None
+    role: Optional[str] = None
+    values: Tuple[str, ...] = ()
+    priorities: Tuple[str, ...] = ()
+    communication_style: Tuple[str, ...] = ()
+    escalation_boundaries: Tuple[str, ...] = ()
+    wiki_profile_path: Optional[Path] = None
+    wiki_profile_excerpt: Optional[str] = None
+
+    def matches(self, task: TelegramTask) -> bool:
+        return task.user_id == self.user_id
+
+    def display_label(self, fallback_username: Optional[str] = None) -> str:
+        username = self.username or fallback_username
+        parts = []
+        if self.display_name:
+            parts.append(self.display_name)
+        if username:
+            parts.append("@{}".format(username.lstrip("@")))
+        if parts:
+            return " ".join(parts)
+        return "Telegram user {}".format(self.user_id)
+
+    def redacted_identity_label(self, fallback_username: Optional[str] = None) -> str:
+        return "primary owner: {} (Telegram user_id {})".format(
+            self.display_label(fallback_username=fallback_username),
+            self.user_id,
+        )
+
+    @property
+    def has_profile_content(self) -> bool:
+        return any(
+            (
+                self.role,
+                self.values,
+                self.priorities,
+                self.communication_style,
+                self.escalation_boundaries,
+                self.wiki_profile_excerpt,
+            )
+        )
+
+
+@dataclass(frozen=True)
 class Workspace:
     """A per-task isolated workspace plan."""
 
