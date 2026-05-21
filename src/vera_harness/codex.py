@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import __version__
-from .config import CommandSpec, HarnessConfig
+from .config import CommandSpec, ConfigError, HarnessConfig
 from .models import Workspace
 
 
@@ -146,6 +146,7 @@ class CodexAppServerRuntime:
         process_factory: Optional[ProcessFactory] = None,
     ) -> None:
         self._config = config
+        self._resolve_process_command = process_factory is None
         self._process_factory = process_factory or _default_process_factory
 
     def run_turn(
@@ -180,7 +181,25 @@ class CodexAppServerRuntime:
                 on_event(event)
 
         try:
-            process = self._process_factory(invocation.command.argv, invocation.workspace_path)
+            command_argv = self._process_command_argv(invocation)
+        except ConfigError as exc:
+            error = "failed to launch Codex app-server: {}".format(exc)
+            emit(
+                CodexRuntimeEvent(
+                    type=CodexRuntimeEventType.ERROR,
+                    message=error,
+                    elapsed_seconds=time.monotonic() - started_at,
+                )
+            )
+            return self._result(
+                _TerminalState(CodexRunStatus.FAILED, error=error),
+                metadata,
+                events,
+                started_at,
+            )
+
+        try:
+            process = self._process_factory(command_argv, invocation.workspace_path)
         except OSError as exc:
             emit(
                 CodexRuntimeEvent(
@@ -491,6 +510,11 @@ class CodexAppServerRuntime:
             error=state.error,
             elapsed_seconds=time.monotonic() - started_at,
         )
+
+    def _process_command_argv(self, invocation: CodexInvocation) -> Tuple[str, ...]:
+        if not self._resolve_process_command:
+            return invocation.command.argv
+        return invocation.command.resolve_executable("VERA_CODEX_APP_SERVER_COMMAND").argv
 
 
 @dataclass

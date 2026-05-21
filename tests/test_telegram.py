@@ -242,6 +242,13 @@ class TelegramLongPollingIntakeTests(unittest.TestCase):
                 ),
                 "Blocked: I need your judgment before continuing. Need a repo URL before continuing.",
             )
+            self.assertEqual(
+                format_telegram_status(
+                    TelegramTaskStatus.FAILED,
+                    reason="Codex failed with Authorization: Bearer secret-token-value",
+                ),
+                "Failed: Vera could not complete the task. Codex failed with Authorization: <redacted secret>",
+            )
 
             polling.send_task_status(task, TelegramTaskStatus.STARTED)
             polling.send_task_status(task, TelegramTaskStatus.COMPLETED)

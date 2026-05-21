@@ -23,3 +23,6 @@
 - 2026-05-20: Updated the Vera harness concept with shared console
   observability, terminal and local web console surfaces, structured event-log
   constraints, redaction defaults, and budget fallback states.
+- 2026-05-20: Updated the Vera harness concept with Codex app-server readiness
+  validation before live task acceptance and command/path diagnostic
+  constraints.
