@@ -17,7 +17,13 @@ from vera_harness.models import (
     TaskEventType,
     TelegramTask,
 )
-from vera_harness.orchestrator import FakeCodexRuntime, VeraHarness, format_dry_run, format_telegram_loop
+from vera_harness.orchestrator import (
+    FakeCodexRuntime,
+    VeraHarness,
+    format_dry_run,
+    format_telegram_chat_loop,
+    format_telegram_loop,
+)
 from vera_harness.state import JsonRunStateStore
 from vera_harness.telegram import TelegramLongPollingIntake, TelegramUpdateStore
 
@@ -342,6 +348,79 @@ class TelegramToCodexSmokeTests(unittest.TestCase):
             self.assertIn("bootstrap command failed", output)
 
 
+class TelegramChatSessionTests(unittest.TestCase):
+    def test_chat_poll_returns_assistant_response_and_reuses_thread_for_followup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                },
+            )
+            api = FakeTelegramApi(
+                (
+                    _message_update(update_id=80, chat_id=100, user_id=200, message_id=300, text="hello"),
+                    _message_update(update_id=81, chat_id=100, user_id=200, message_id=301, text="what did I just say?"),
+                )
+            )
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+                send_accepted_reply=False,
+            )
+            runtime = ScriptedChatRuntime(("Hello from persistent Codex.", "You said hello."))
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: runtime)
+
+            result = harness.run_telegram_chat_poll_once(
+                polling_intake=intake,
+                run_bootstrap=False,
+            )
+            output = format_telegram_chat_loop(result)
+
+            self.assertEqual([message["text"] for message in api.sent_messages], ["Hello from persistent Codex.", "You said hello."])
+            self.assertEqual(runtime.calls, 2)
+            self.assertEqual(runtime.prompts[1], "what did I just say?")
+            self.assertEqual(result.chat_turns[0].session.session_id, result.chat_turns[1].session.session_id)
+            self.assertEqual(result.chat_turns[1].session.thread_id, "thread-1")
+            self.assertEqual(result.chat_turns[1].session.turns_completed, 2)
+            self.assertIn("assistant_response: You said hello.", output)
+            state = Path(config.chat_session_state_path).read_text(encoding="utf-8")
+            self.assertIn("thread-1", state)
+            self.assertIn("telegram-chat-100-user-200", state)
+
+    def test_chat_poll_codex_launch_failure_does_not_send_lifecycle_acceptance(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                },
+            )
+            api = FakeTelegramApi((_message_update(update_id=82, chat_id=100, user_id=200, message_id=300, text="hello"),))
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+                send_accepted_reply=False,
+            )
+            runtime = ScriptedChatRuntime((), status=CodexRunStatus.FAILED, error="failed to launch Codex app-server: missing codex")
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: runtime)
+
+            result = harness.run_telegram_chat_poll_once(
+                polling_intake=intake,
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(len(api.sent_messages), 1)
+            self.assertNotEqual(api.sent_messages[0]["text"], "Accepted: queued.")
+            self.assertIn("Failed: Vera could not complete the task.", api.sent_messages[0]["text"])
+            self.assertIn("missing codex", api.sent_messages[0]["text"])
+            self.assertEqual(result.chat_turns[0].session.last_status, HarnessRunStatus.FAILED.value)
+
+
 class ScriptedRuntime:
     def __init__(self, results):
         self._results = list(results)
@@ -356,10 +435,67 @@ class ScriptedRuntime:
         return result
 
 
+class ScriptedChatRuntime:
+    def __init__(self, responses, status=CodexRunStatus.COMPLETED, error=None):
+        self._responses = list(responses)
+        self._status = status
+        self._error = error
+        self.calls = 0
+        self.prompts = []
+        self._thread_id = "thread-1"
+        self._turn_id = None
+        self._pending_request = None
+
+    @property
+    def thread_id(self):
+        return self._thread_id
+
+    @property
+    def turn_id(self):
+        return self._turn_id
+
+    @property
+    def pending_request(self):
+        return self._pending_request
+
+    def run_turn(self, invocation, on_event=None):
+        self.calls += 1
+        self.prompts.append(invocation.prompt)
+        self._turn_id = "turn-{}".format(self.calls)
+        response = self._responses.pop(0) if self._responses else None
+        event = CodexRuntimeEvent(
+            type=CodexRuntimeEventType.TURN_COMPLETED,
+            method="turn/completed",
+            message=response,
+            thread_id=self._thread_id,
+            turn_id=self._turn_id,
+        )
+        if on_event is not None:
+            on_event(event)
+        return CodexRunResult(
+            status=self._status,
+            metadata=CodexSessionMetadata(
+                command=invocation.display_command,
+                cwd=invocation.workspace_path,
+                approval_policy=invocation.approval_policy,
+                sandbox_mode=invocation.sandbox_mode,
+                thread_id=self._thread_id,
+                turn_id=self._turn_id,
+            ),
+            events=(event,),
+            error=self._error,
+            assistant_response=response,
+        )
+
+    def close(self):
+        pass
+
+
 def _config(temp_dir, extra_env=None):
     env = {
         "VERA_WORKSPACE_ROOT": temp_dir,
         "VERA_RUN_STATE_PATH": str(Path(temp_dir, "run-state.json")),
+        "VERA_CHAT_SESSION_STATE_PATH": str(Path(temp_dir, "chat-sessions.json")),
         "VERA_TELEGRAM_STATE_PATH": str(Path(temp_dir, "telegram-state.json")),
         "VERA_CODEX_APP_SERVER_COMMAND": "fake-codex app-server",
     }

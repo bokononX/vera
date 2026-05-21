@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 import tempfile
 import threading
@@ -14,9 +13,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
+from .chat import ChatSessionStateError
 from .codex import CodexAppServerError
 from .config import CommandResolution, ConfigError, HarnessConfig
-from .orchestrator import FakeCodexRuntime, VeraHarness, format_dry_run, format_poll_once, format_telegram_loop
+from .orchestrator import (
+    FakeCodexRuntime,
+    VeraHarness,
+    format_dry_run,
+    format_poll_once,
+    format_telegram_chat_loop,
+    format_telegram_loop,
+)
 from .state import RunStateError
 from .telegram import TelegramApiError, TelegramLongPollingIntake, TelegramUpdateStore
 from .workspace import WorkspaceError
@@ -218,6 +225,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     except (
         CodexAppServerError,
+        ChatSessionStateError,
         ConfigError,
         PermissionError,
         RunStateError,
@@ -251,6 +259,7 @@ def _format_config_check(config: HarnessConfig) -> str:
             "telegram_request_timeout_seconds: {}".format(config.telegram_request_timeout_seconds),
             "telegram_state_path: {}".format(config.telegram_state_path),
             "telegram_unauthorized_response: {}".format(unauthorized),
+            "chat_session_state_path: {}".format(config.chat_session_state_path),
             "event_log_path: {}".format(config.event_log_path),
             "budget_snapshot_path: {}".format(config.budget_snapshot_path or "<not configured>"),
             "monthly_budget_usd: {}".format(_display_optional_config(config.monthly_budget_usd)),
@@ -286,9 +295,9 @@ def _run_monitor(
     harness = VeraHarness(config, on_event=event_log.append_task_event)
     cycles = 0
     while True:
-        result = harness.run_telegram_poll_once()
-        _append_telegram_status_events(event_log, result)
-        print(format_telegram_loop(result, title=title))
+        result = harness.run_telegram_chat_poll_once()
+        _append_telegram_chat_events(event_log, result)
+        print(format_telegram_chat_loop(result, title=title))
         cycles += 1
         if max_poll_cycles is not None and cycles >= max_poll_cycles:
             return 0
@@ -367,8 +376,8 @@ class _ConsoleMonitorSupervisor:
         assert self._harness is not None
         try:
             while not self._stop_event.is_set():
-                result = self._harness.run_telegram_poll_once()
-                _append_telegram_status_events(self._event_log, result)
+                result = self._harness.run_telegram_chat_poll_once()
+                _append_telegram_chat_events(self._event_log, result)
                 if self._stop_event.wait(self._poll_interval_seconds):
                     break
         except Exception as exc:  # noqa: BLE001 - surface background failures in the console.
@@ -395,9 +404,13 @@ def _console_monitor_startup_error(config: HarnessConfig) -> Optional[str]:
         failures.append(
             "telegram.allowed_chat_ids or telegram.allowed_user_ids is required for live console monitoring"
         )
-    executable = config.codex_app_server_command.argv[0]
-    if shutil.which(executable) is None:
-        failures.append("Codex app-server executable is not available on PATH: {}".format(executable))
+    try:
+        config.codex_app_server_command.resolve_executable(
+            "VERA_CODEX_APP_SERVER_COMMAND",
+            cwd=Path.cwd(),
+        )
+    except ConfigError as exc:
+        failures.append(str(exc))
     if failures:
         return "; ".join(failures)
     return None
@@ -411,6 +424,23 @@ def _append_telegram_status_events(event_log: Any, result: Any) -> None:
             summary=delivery.text,
             task_id=delivery.task_id,
             run_id=None,
+            details={
+                "chat_id": delivery.chat_id,
+                "message_id": delivery.message_id,
+                "update_id": delivery.update_id,
+                "status": delivery.status.value,
+            },
+        )
+
+
+def _append_telegram_chat_events(event_log: Any, result: Any) -> None:
+    for delivery in result.response_deliveries:
+        event_log.append_source_event(
+            source="telegram",
+            event_type="telegram_chat_response",
+            summary=delivery.text,
+            task_id=delivery.session_id,
+            run_id=delivery.session_id,
             details={
                 "chat_id": delivery.chat_id,
                 "message_id": delivery.message_id,
@@ -447,6 +477,7 @@ def _console_monitor_details(config: HarnessConfig) -> Mapping[str, object]:
         "run_state_path": str(config.run_state_path),
         "event_log_path": str(config.event_log_path),
         "telegram_state_path": str(config.telegram_state_path),
+        "chat_session_state_path": str(config.chat_session_state_path),
         "codex_app_server_command": config.codex_app_server_command.display,
     }
 

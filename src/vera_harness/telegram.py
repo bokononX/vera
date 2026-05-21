@@ -277,6 +277,7 @@ class TelegramLongPollingIntake:
         store: Optional[TelegramUpdateStore] = None,
         queue: Optional[TelegramTaskQueue] = None,
         intake: Optional[TelegramIntake] = None,
+        send_accepted_reply: bool = True,
     ) -> None:
         self._config = config
         self._api = api or TelegramBotApi(
@@ -287,6 +288,7 @@ class TelegramLongPollingIntake:
         self._store = store or TelegramUpdateStore(config.telegram_state_path)
         self._queue = queue or TelegramTaskQueue()
         self._intake = intake or TelegramIntake(config)
+        self._send_accepted_reply = send_accepted_reply
 
     @property
     def queue(self) -> TelegramTaskQueue:
@@ -314,6 +316,19 @@ class TelegramLongPollingIntake:
         self._api.send_message(
             chat_id=task.chat_id,
             text=format_telegram_status(normalized_status, reason=reason),
+            reply_to_message_id=task.message_id,
+        )
+
+    def send_chat_response(
+        self,
+        task: TelegramTask,
+        text: str,
+        status: TelegramTaskStatus = TelegramTaskStatus.COMPLETED,
+    ) -> None:
+        self._store.record_task_status(task, status)
+        self._api.send_message(
+            chat_id=task.chat_id,
+            text=text,
             reply_to_message_id=task.message_id,
         )
 
@@ -374,11 +389,12 @@ class TelegramLongPollingIntake:
         self._store.record_task_status(task, TelegramTaskStatus.ACCEPTED)
         self._store.mark_update_processed(update_id)
         self._queue.enqueue(task)
-        self._api.send_message(
-            chat_id=chat_id,
-            text=format_telegram_status(TelegramTaskStatus.ACCEPTED),
-            reply_to_message_id=message_id,
-        )
+        if self._send_accepted_reply:
+            self._api.send_message(
+                chat_id=chat_id,
+                text=format_telegram_status(TelegramTaskStatus.ACCEPTED),
+                reply_to_message_id=message_id,
+            )
         return TelegramIntakeOutcome(
             update_id=update_id,
             status=TelegramUpdateStatus.ACCEPTED,

@@ -2,9 +2,9 @@
 
 This repository contains the Python scaffold for the Vera agent harness. It can
 load configuration, synthesize the Herald/The Place/Vera policy prompt, resolve
-a per-task workspace, poll Telegram through the Bot API, queue authorized
-Telegram tasks, run accepted tasks through a fake or live Codex runtime, and
-send concise Telegram status replies for the task lifecycle.
+managed workspaces, poll Telegram through the Bot API, queue authorized
+Telegram messages, and pass live chat messages into a persistent Codex app-server
+thread.
 
 ## Local Dry Run
 
@@ -56,9 +56,10 @@ does not print the raw Telegram task text.
 ## Operational Monitor
 
 Live Telegram intake uses Bot API long polling. The production monitor command
-polls Telegram, queues authorized text messages, prepares an isolated workspace,
-runs Codex through the configured app-server command, and sends Telegram status
-replies for accepted, started, blocked, failed, and completed outcomes.
+polls Telegram, queues authorized text messages, prepares or reuses a dedicated
+workspace for each Telegram chat/user session, launches a long-lived Codex
+app-server process, starts or resumes the Codex thread for that session, and
+sends the assistant's final response back to Telegram.
 
 ```sh
 mkdir -p .vera
@@ -81,9 +82,17 @@ the monitor changes into task workspaces.
 `--monitor` runs the same headless loop used by the default TUI console and runs
 until interrupted. Use `--max-poll-cycles N` to stop after a bounded number of
 polling cycles, and `--poll-interval-seconds N` to control the sleep between
-cycles. Each cycle prints an audit-friendly log that includes the task id,
-Telegram chat/update/message ids, workspace path, Codex session/turn ids when
-available, status messages sent to Telegram, and final outcome.
+cycles. Each cycle prints an audit-friendly chat log that includes the persistent
+session id, Telegram chat/update/message ids, workspace path, Codex thread/turn
+ids when available, the response sent to Telegram, and final Codex status.
+
+In chat mode the first accepted message receives a natural assistant response,
+not a `Started`/`Completed` lifecycle reply. Follow-up messages from the same
+Telegram chat/user pair reuse the same local session id, workspace, app-server
+process, and Codex thread when the process is still active. On restart, Vera
+loads `VERA_CHAT_SESSION_STATE_PATH` and asks the app-server to resume the last
+known thread; if resume is unavailable, it safely starts a new thread while
+preserving Telegram authorization and local session mapping state.
 
 `--poll-once` remains available for intake-only diagnostics. It performs one
 `getUpdates` call, queues accepted tasks, sends `Accepted: queued.`, and exits
@@ -99,9 +108,10 @@ PYTHONPATH=src python3 -m vera_harness --console-gui --console-port 8765
 ```
 
 The TUI opens in the current terminal and, by default, starts the Telegram
-monitor loop in the same process. Exiting the TUI requests the managed monitor
-loop to stop. Startup/configuration failures are written into the console event
-stream so the terminal shows a local error state instead of an empty viewer.
+chat monitor loop in the same process. Exiting the TUI requests the managed
+monitor loop to stop. Startup/configuration failures are written into the
+console event stream so the terminal shows a local error state instead of an
+empty viewer.
 
 Use view-only mode to attach to run state and events from an already-running
 monitor without starting another poller:
@@ -114,6 +124,8 @@ The GUI serves a local web app and prints the listening URL. The console
 surfaces read:
 
 - `VERA_RUN_STATE_PATH` for active, completed, blocked, and failed runs;
+- `VERA_CHAT_SESSION_STATE_PATH` for Telegram chat/user to workspace/thread
+  mappings;
 - `VERA_EVENT_LOG_PATH` for structured task, Codex, source-channel, and error
   events;
 - optional budget telemetry from `VERA_BUDGET_SNAPSHOT_PATH` and budget
@@ -182,8 +194,8 @@ No OpenAI or Telegram secret values belong in snapshots, event logs, or docs.
 
 Use the live smoke command only after `--check-config` succeeds and a local
 Codex app-server command is available. It polls Telegram once, runs any accepted
-tasks through the configured Codex runtime, sends final Telegram statuses, and
-then exits.
+messages through the configured persistent Codex chat runtime, sends final
+Telegram chat responses, and then exits.
 
 ```sh
 export VERA_TELEGRAM_BOT_TOKEN="..."
@@ -204,6 +216,12 @@ Telegram offset and task lifecycle state are persisted locally at
 `telegram.state_path`. The state file stores update ids and task metadata such
 as chat id, user id, message id, and lifecycle status. It does not persist raw
 Telegram message text or usernames.
+
+Persistent chat session state is stored at `VERA_CHAT_SESSION_STATE_PATH`
+(`./.vera/chat_sessions.json` by default). It records the Vera session id,
+Telegram chat/user mapping, workspace path, Codex thread id, last turn id, last
+known status, pending prompt, and last assistant response needed for local
+restart/recovery. It does not store raw inbound Telegram message text.
 
 ## Configuration
 
@@ -258,6 +276,7 @@ Other harness and Codex settings remain environment-backed:
 | `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required for `--monitor`, `--live-smoke`, `--poll-once`, and `--check-config`. |
 | `VERA_TELEGRAM_CONFIG_PATH` | No | Optional path to Telegram non-secret JSON config. Equivalent to `--telegram-config`. |
 | `VERA_RUN_STATE_PATH` | No | Local JSON file for minimal orchestration run state. Defaults to `./.vera/run_state.json`. |
+| `VERA_CHAT_SESSION_STATE_PATH` | No | Local JSON file for persistent Telegram chat sessions and Codex thread ids. Defaults to `./.vera/chat_sessions.json`. |
 | `VERA_EVENT_LOG_PATH` | No | Local JSONL file for structured console events. Defaults to `./.vera/events.jsonl`. |
 | `VERA_BUDGET_SNAPSHOT_PATH` | No | Optional local JSON file with rate-limit and usage snapshots for the console budget bar. |
 | `VERA_MONTHLY_BUDGET_USD` | No | Optional monthly budget threshold shown in the console. |
@@ -344,15 +363,16 @@ Implemented now:
 - authorization by configured chat and/or user ids;
 - duplicate update suppression across restarts through local offset
   persistence;
-- concise Telegram status replies for accepted, rejected, started, completed,
-  blocked, and failed task states;
+- concise Telegram status replies for legacy task mode, plus persistent chat
+  responses for live monitor/TUI operation;
 - deterministic isolated workspace lifecycle with explicit reuse/fresh/existing
   policies, metadata recording, root escape protection, bounded bootstrap
   command execution, and guarded cleanup hooks;
 - dry-run CLI output that runs prompt construction, workspace selection, fake
   Codex runtime execution, final decision mapping, and event emission locally;
 - Codex app-server launch over stdio JSON-RPC;
-- `initialize`, `thread/start`, and `turn/start` request flow;
+- `initialize`, `thread/start` or `thread/resume`, and `turn/start` request
+  flow;
 - structured runtime events for server notifications, approval-required,
   input-required, completion, failure, cancellation, timeout, and process exit;
 - fail-closed unattended behavior unless explicit auto-response config is set;
@@ -360,8 +380,8 @@ Implemented now:
   prompt synthesis, up-to-max-turn Codex execution, continuation/completion/
   retry/block/failure decisions, structured task events, and minimal JSON run
   state that prevents duplicate active task runs across restarts.
-- a production Telegram monitor loop that drains accepted tasks into the Codex
-  runtime and reports final status back to Telegram;
+- a production Telegram monitor loop that drains accepted messages into
+  persistent chat sessions and reports assistant responses back to Telegram;
 - a fake end-to-end smoke command that covers Telegram update -> task ->
   workspace -> Codex runtime -> Telegram status response without live services;
 - an optional one-cycle live smoke command for configured Telegram and local

@@ -681,7 +681,7 @@ def _focused_snapshot(
     if agent is None:
         return None
     agent_events = [event for event in events if event.agent_id == agent.agent_id or event.task_id == agent.task_id]
-    last_decision = _last_event(agent_events, ("decision_recorded", "codex_turn_completed"))
+    last_decision = _last_event(agent_events, ("assistant_response", "decision_recorded", "codex_turn_completed"))
     last_summary = last_decision.summary if last_decision is not None else "No completed turn has been recorded yet."
     blockers = tuple(
         event.summary
@@ -768,6 +768,8 @@ def _category_for_task_event(event: TaskEvent) -> ConsoleEventCategory:
             method.startswith("item/tool") or method.startswith("tool/")
         ):
             return ConsoleEventCategory.TOOL
+        return ConsoleEventCategory.CODEX
+    if event.type == TaskEventType.ASSISTANT_RESPONSE:
         return ConsoleEventCategory.CODEX
     if event.type in {TaskEventType.CODEX_TURN_STARTED, TaskEventType.CODEX_TURN_COMPLETED}:
         return ConsoleEventCategory.REASONING
