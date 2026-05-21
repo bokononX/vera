@@ -7,9 +7,13 @@ from pathlib import Path
 
 from vera_harness.codex import (
     CodexAppServerError,
+    CodexAppServerSession,
     CodexAppServerRuntime,
     CodexRunStatus,
+    CodexRuntimeEvent,
+    CodexRuntimeEventType,
     CodexRuntimePlanner,
+    extract_assistant_response,
 )
 from vera_harness.config import HarnessConfig
 from vera_harness.models import Workspace
@@ -171,6 +175,97 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
             self.assertEqual(sent[1]["params"]["sandbox"], "read-only")
             self.assertEqual(sent[2]["params"]["input"], [{"type": "text", "text": "Ship the runtime adapter."}])
             self.assertEqual(sent[2]["params"]["sandboxPolicy"], {"type": "readOnly", "networkAccess": False})
+
+    def test_persistent_session_reuses_thread_and_extracts_assistant_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            factory = ProcessFactory(_persistent_success_messages(workspace))
+            session = CodexAppServerSession(_config(temp_dir), process_factory=factory)
+
+            first = session.run_turn(_invocation(temp_dir, "hello"))
+            second = session.run_turn(_invocation(temp_dir, "follow up"))
+            session.close()
+
+            self.assertEqual(first.status, CodexRunStatus.COMPLETED)
+            self.assertEqual(first.assistant_response, "Hello from Codex.")
+            self.assertEqual(second.status, CodexRunStatus.COMPLETED)
+            self.assertEqual(second.assistant_response, "Still the same thread.")
+            self.assertEqual(first.metadata.thread_id, "thread-1")
+            self.assertEqual(second.metadata.thread_id, "thread-1")
+            self.assertTrue(factory.processes[0].terminated)
+            sent = _sent_messages(factory.processes[0])
+            self.assertEqual(
+                [message.get("method") for message in sent],
+                ["initialize", "thread/start", "turn/start", "turn/start"],
+            )
+            self.assertEqual(sent[2]["params"]["threadId"], "thread-1")
+            self.assertEqual(sent[3]["params"]["threadId"], "thread-1")
+            self.assertEqual(sent[3]["params"]["input"], [{"type": "text", "text": "follow up"}])
+
+    def test_persistent_session_launch_failure_returns_failed_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            def failing_factory(command, cwd):
+                raise FileNotFoundError("missing codex")
+
+            session = CodexAppServerSession(_config(temp_dir), process_factory=failing_factory)
+
+            result = session.run_turn(_invocation(temp_dir, "hello"))
+
+            self.assertEqual(result.status, CodexRunStatus.FAILED)
+            self.assertIn("failed to launch Codex app-server", result.error)
+
+    def test_persistent_session_resumes_existing_thread_when_available(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            messages = [
+                _base_messages(workspace)[0],
+                {
+                    "id": 2,
+                    "result": {
+                        "thread": {"id": "thread-existing"},
+                        "model": "gpt-test",
+                        "modelProvider": "openai",
+                    },
+                },
+                {"id": 3, "result": {"turn": {"id": "turn-1", "status": "inProgress", "items": []}}},
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-existing",
+                        "turn": {"id": "turn-1", "status": "completed", "items": []},
+                    },
+                },
+            ]
+            factory = ProcessFactory(messages)
+            session = CodexAppServerSession(
+                _config(temp_dir),
+                process_factory=factory,
+                resume_thread_id="thread-existing",
+            )
+
+            result = session.run_turn(_invocation(temp_dir, "resume"))
+            session.close()
+
+            self.assertEqual(result.status, CodexRunStatus.COMPLETED)
+            self.assertEqual(result.metadata.thread_id, "thread-existing")
+            self.assertEqual(
+                [message.get("method") for message in _sent_messages(factory.processes[0])],
+                ["initialize", "thread/resume", "turn/start"],
+            )
+
+    def test_extract_assistant_response_prefers_turn_items(self):
+        event = _event_from_payload(
+            {
+                "turn": {
+                    "items": [
+                        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+                        {"role": "assistant", "content": [{"type": "output_text", "text": "Natural response."}]},
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(extract_assistant_response((event,)), "Natural response.")
 
     def test_run_turn_maps_failed_turn_to_failed_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -374,6 +469,44 @@ def _successful_messages(workspace):
     ]
 
 
+def _persistent_success_messages(workspace):
+    return _base_messages(workspace) + [
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "status": "completed",
+                    "items": [
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Hello from Codex."}],
+                        }
+                    ],
+                },
+            },
+        },
+        {"id": 4, "result": {"turn": {"id": "turn-2", "status": "inProgress", "items": []}}},
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-2",
+                    "status": "completed",
+                    "items": [
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Still the same thread."}],
+                        }
+                    ],
+                },
+            },
+        },
+    ]
+
+
 def _base_messages(workspace):
     return [
         {
@@ -400,6 +533,14 @@ def _base_messages(workspace):
         },
         {"id": 3, "result": {"turn": {"id": "turn-1", "status": "inProgress", "items": []}}},
     ]
+
+
+def _event_from_payload(payload):
+    return CodexRuntimeEvent(
+        type=CodexRuntimeEventType.TURN_COMPLETED,
+        method="turn/completed",
+        payload=payload,
+    )
 
 
 def _sent_messages(process):

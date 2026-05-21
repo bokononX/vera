@@ -1,7 +1,7 @@
 # Vera Harness
 
-The Vera harness is the local agent runtime that turns an authorized Telegram
-task into a regulated Codex run inside an isolated workspace.
+The Vera harness is the local agent runtime that turns authorized Telegram
+messages into regulated Codex work inside managed local workspaces.
 
 ## Concept
 
@@ -14,6 +14,11 @@ runtime execution explicit:
 - **Telegram state:** persists processed update ids and compact task lifecycle
   metadata so restarts do not duplicate accepted work while avoiding raw chat
   history storage.
+- **Chat session state:** maps an authorized Telegram chat/user pair to a
+  stable Vera session id, managed workspace, Codex thread id, last turn id, last
+  known status, pending prompt, and last assistant response so monitor restarts
+  can resume or safely recreate the conversational session without preserving
+  raw inbound chat history.
 - **Telegram configuration:** keeps non-secret connectivity settings in a
   local JSON config file while leaving the bot token in an environment-backed
   secret path.
@@ -21,14 +26,15 @@ runtime execution explicit:
   The Place's coordination protocols, and Vera's trust constraints, including
   onion peeling, interest surfacing, face-saving, minimal disclosure,
   non-sycophancy, reversibility, evidence, uncertainty, and explicit blockers.
-- **Workspace management:** resolves one local workspace per task, validates
-  that the path cannot escape the configured workspace root, records compact
-  workspace metadata, and exposes explicit reuse, fresh-create, bootstrap, and
-  cleanup behavior.
+- **Workspace management:** resolves local workspaces for either legacy tasks
+  or persistent chat sessions, validates that paths cannot escape the configured
+  workspace root, records compact workspace metadata, and exposes explicit
+  reuse, fresh-create, bootstrap, and cleanup behavior.
 - **Codex runtime execution:** launches the configured Codex app-server command
-  inside the task workspace after readiness resolves the executable path,
-  initializes the JSON-RPC session, starts a thread with configured approval and
-  sandbox policy, and starts task turns with the synthesized prompt.
+  inside the managed workspace after readiness resolves the executable path,
+  initializes the JSON-RPC session, starts or resumes a thread with configured
+  approval and sandbox policy, and starts turns with either the synthesized
+  initial prompt or a follow-up Telegram message.
 - **Runtime event stream:** converts app-server notifications and server
   requests into harness-level events so the orchestrator and Telegram status
   layer can report completion, failure, cancellation, approval-required,
@@ -38,10 +44,12 @@ runtime execution explicit:
   configured turn and retry budgets, maps each turn to continue/complete/retry/
   block/fail decisions, emits task lifecycle events, and persists minimal run
   state so active tasks are not duplicated after restart.
-- **Operational loop:** drains accepted Telegram tasks into the orchestration
-  loop, sends started and terminal Telegram status replies, and emits
-  audit-suitable logs with task ids, Telegram ids, workspace paths, Codex
-  session/turn ids when available, and final outcomes.
+- **Operational loop:** drains accepted Telegram messages into persistent chat
+  sessions for live monitor/TUI operation, sends the final assistant response or
+  an explicit blocked/failed prompt back to Telegram, and emits audit-suitable
+  logs with session ids, Telegram ids, workspace paths, Codex thread/turn ids
+  when available, and final outcomes. The legacy per-task loop remains
+  available for dry-run, fake smoke, and intake diagnostics.
 - **Console observability:** projects run state, structured events, focus
   selection, last-turn summaries, current plan, redacted log stream, and budget
   telemetry into a shared state provider used by both terminal and local web
@@ -69,21 +77,24 @@ runtime execution explicit:
   fallback when no config file is present.
 - Telegram transport details should stay isolated from Codex and workspace
   planning.
-- The harness should collect and persist only the task context and lifecycle
-  metadata needed for the run.
-- Workspace identity should come from the stable Telegram task/run id and map
-  to a deterministic safe path segment under the configured workspace root.
+- The harness should collect and persist only the task or chat-session metadata
+  needed for restart/recovery.
+- Workspace identity should come from either the stable Telegram task/run id or
+  stable Telegram chat-session id and map to a deterministic safe path segment
+  under the configured workspace root.
 - Existing workspace reuse, fresh creation, and require-existing continuation
   should be explicit policy choices rather than implicit side effects.
 - Bootstrap commands may prepare a workspace, but they must run inside that
   workspace, be timeout-bound, and capture stdout/stderr for diagnostics.
 - Cleanup must be explicit and constrained to paths that remain inside the
   configured workspace root after resolution.
-- Telegram replies should be concise and action-oriented: accepted, rejected,
-  started, completed, blocked, and failed states should be obvious without
-  exposing more context than the chat already supplied.
+- Telegram replies should be concise and action-oriented. Live chat mode should
+  make the assistant response the primary reply and reserve blocked/failed
+  prompts for cases where Codex cannot continue without user action.
 - Operational logs should preserve enough IDs to debug and later audit a run
   while avoiding raw Telegram message text and unnecessary user context.
+- Persistent chat-session state may record the last assistant response and
+  pending prompt, but it should not record raw inbound Telegram message text.
 - Console events should use a small structured schema rather than ad hoc log
   parsing, and should redact secrets plus raw private source-channel bodies by
   default.
@@ -104,8 +115,10 @@ runtime execution explicit:
   than hidden.
 - Unattended Codex runs should fail closed on approval or input requests unless
   an explicit auto-response policy is configured.
-- Codex turns must produce an explicit Vera task status marker so the harness
-  can distinguish completion from safe continuation, blockers, and failures.
+- Legacy task turns must produce an explicit Vera task status marker so the
+  harness can distinguish completion from safe continuation, blockers, and
+  failures; live chat turns derive the Telegram reply from app-server assistant
+  output and pending request events.
 
 ## Source
 

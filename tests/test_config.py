@@ -19,6 +19,7 @@ class HarnessConfigTests(unittest.TestCase):
                     "VERA_TELEGRAM_STATE_PATH": str(Path(temp_dir, "telegram-state.json")),
                     "VERA_TELEGRAM_UNAUTHORIZED_RESPONSE": "This chat is not authorized.",
                     "VERA_RUN_STATE_PATH": str(Path(temp_dir, "run-state.json")),
+                    "VERA_CHAT_SESSION_STATE_PATH": str(Path(temp_dir, "chat-sessions.json")),
                     "VERA_WORKSPACE_ROOT": temp_dir,
                     "VERA_CODEX_APP_SERVER_COMMAND": "codex app-server --port 0",
                     "VERA_MAX_TURNS": "7",
@@ -45,6 +46,7 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_state_path, Path(temp_dir, "telegram-state.json").resolve())
         self.assertEqual(config.telegram_unauthorized_response, "This chat is not authorized.")
         self.assertEqual(config.run_state_path, Path(temp_dir, "run-state.json").resolve())
+        self.assertEqual(config.chat_session_state_path, Path(temp_dir, "chat-sessions.json").resolve())
         self.assertEqual(config.workspace_root, Path(temp_dir).resolve())
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server", "--port", "0"))
         self.assertEqual(config.max_turns, 7)
@@ -72,6 +74,7 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_state_path.name, "telegram_state.json")
         self.assertIsNone(config.telegram_unauthorized_response)
         self.assertEqual(config.run_state_path.name, "run_state.json")
+        self.assertEqual(config.chat_session_state_path.name, "chat_sessions.json")
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server"))
         self.assertEqual(config.max_retries, 1)
         self.assertEqual(config.workspace_bootstrap_timeout_seconds, 300)

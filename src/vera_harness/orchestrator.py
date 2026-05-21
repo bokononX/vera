@@ -5,11 +5,15 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, replace
-from typing import Callable, List, Optional, Protocol, Tuple
+from typing import Callable, Dict, List, Optional, Protocol, Tuple
+
+from .chat import JsonTelegramChatSessionStore, TelegramChatSession
 
 from .codex import (
     CodexAppServerRuntime,
+    CodexAppServerSession,
     CodexInvocation,
+    CodexPendingRequest,
     CodexRunResult,
     CodexRunStatus,
     CodexRuntimeEvent,
@@ -57,6 +61,35 @@ class CodexRuntime(Protocol):
         """Run one Codex turn."""
 
 
+class CodexChatRuntime(Protocol):
+    """Persistent runtime boundary used by Telegram chat mode."""
+
+    @property
+    def thread_id(self) -> Optional[str]:
+        """Return the active Codex thread id if known."""
+
+    @property
+    def turn_id(self) -> Optional[str]:
+        """Return the active or last Codex turn id if known."""
+
+    @property
+    def pending_request(self) -> Optional[CodexPendingRequest]:
+        """Return a pending Codex input/approval request if one is blocked."""
+
+    def run_turn(
+        self,
+        invocation: CodexInvocation,
+        on_event: Optional[RuntimeEventCallback] = None,
+    ) -> CodexRunResult:
+        """Run or resume one Codex turn in the persistent session."""
+
+    def close(self) -> None:
+        """Close the persistent app-server process."""
+
+
+ChatRuntimeFactory = Callable[[Optional[str]], CodexChatRuntime]
+
+
 class RunStateStore(Protocol):
     """Minimal persistence boundary for orchestration run state."""
 
@@ -68,6 +101,16 @@ class RunStateStore(Protocol):
 
     def save_run(self, state: RunState) -> RunState:
         """Persist a run-state update."""
+
+
+class ChatSessionStore(Protocol):
+    """Minimal persistence boundary for Telegram chat sessions."""
+
+    def get_or_create(self, task: TelegramTask) -> TelegramChatSession:
+        """Return an existing chat session for this Telegram source or create one."""
+
+    def save(self, session: TelegramChatSession) -> TelegramChatSession:
+        """Persist a chat-session update."""
 
 
 @dataclass(frozen=True)
@@ -130,6 +173,38 @@ class TelegramLoopResult:
     status_deliveries: Tuple[TelegramStatusDelivery, ...]
 
 
+@dataclass(frozen=True)
+class TelegramChatResponseDelivery:
+    """A user-facing Telegram chat response emitted after a Codex turn."""
+
+    update_id: Optional[int]
+    session_id: str
+    task_id: str
+    chat_id: int
+    message_id: int
+    text: str
+    status: TelegramTaskStatus
+
+
+@dataclass(frozen=True)
+class TelegramChatTurnResult:
+    """A Codex chat turn correlated back to the Telegram update that produced it."""
+
+    update_id: Optional[int]
+    task: TelegramTask
+    session: TelegramChatSession
+    run_result: CodexRunResult
+
+
+@dataclass(frozen=True)
+class TelegramChatLoopResult:
+    """One Telegram polling cycle plus persistent Codex chat turns."""
+
+    poll_result: PollOnceResult
+    chat_turns: Tuple[TelegramChatTurnResult, ...]
+    response_deliveries: Tuple[TelegramChatResponseDelivery, ...]
+
+
 class VeraHarness:
     """Coordinates intake, workspace lifecycle, policy prompts, and Codex turns."""
 
@@ -138,6 +213,8 @@ class VeraHarness:
         config: HarnessConfig,
         runtime: Optional[CodexRuntime] = None,
         run_store: Optional[RunStateStore] = None,
+        chat_store: Optional[ChatSessionStore] = None,
+        chat_runtime_factory: Optional[ChatRuntimeFactory] = None,
         on_event: Optional[TaskEventCallback] = None,
     ) -> None:
         self._config = config
@@ -146,6 +223,11 @@ class VeraHarness:
         self._planner = CodexRuntimePlanner(config)
         self._runtime = runtime or CodexAppServerRuntime(config)
         self._run_store = run_store or JsonRunStateStore(config.run_state_path)
+        self._chat_store = chat_store or JsonTelegramChatSessionStore(config.chat_session_state_path)
+        self._chat_runtime_factory = chat_runtime_factory or (
+            lambda resume_thread_id: CodexAppServerSession(config, resume_thread_id=resume_thread_id)
+        )
+        self._chat_runtimes: Dict[str, CodexChatRuntime] = {}
         self._on_event = on_event
 
     def dry_run_task(
@@ -507,6 +589,207 @@ class VeraHarness:
             status_deliveries=tuple(deliveries),
         )
 
+    def run_telegram_chat_poll_once(
+        self,
+        polling_intake: Optional[TelegramLongPollingIntake] = None,
+        create_workspace: bool = True,
+        workspace_policy: WorkspaceReusePolicy = WorkspaceReusePolicy.REUSE,
+        run_bootstrap: bool = True,
+    ) -> TelegramChatLoopResult:
+        """Poll Telegram once and pass accepted messages into persistent Codex chat sessions."""
+
+        intake = polling_intake or TelegramLongPollingIntake(
+            self._config,
+            send_accepted_reply=False,
+        )
+        outcomes = intake.poll_once()
+        poll_result = PollOnceResult(
+            outcomes=outcomes,
+            queued_tasks=intake.queue.queued_tasks(),
+        )
+        task_update_ids = {
+            outcome.task.task_id: outcome.update_id
+            for outcome in outcomes
+            if outcome.task is not None
+        }
+        turns: List[TelegramChatTurnResult] = []
+        responses: List[TelegramChatResponseDelivery] = []
+
+        for task in intake.queue.drain():
+            update_id = task_update_ids.get(task.task_id)
+            session, run_result = self.run_chat_turn(
+                task,
+                create_workspace=create_workspace,
+                workspace_policy=workspace_policy,
+                run_bootstrap=run_bootstrap,
+            )
+            response_status, response_text = _telegram_chat_response_for_result(run_result)
+            intake.send_chat_response(task, response_text, status=response_status)
+            responses.append(
+                TelegramChatResponseDelivery(
+                    update_id=update_id,
+                    session_id=session.session_id,
+                    task_id=task.task_id,
+                    chat_id=task.chat_id,
+                    message_id=task.message_id,
+                    text=response_text,
+                    status=response_status,
+                )
+            )
+            turns.append(
+                TelegramChatTurnResult(
+                    update_id=update_id,
+                    task=task,
+                    session=session,
+                    run_result=run_result,
+                )
+            )
+
+        return TelegramChatLoopResult(
+            poll_result=poll_result,
+            chat_turns=tuple(turns),
+            response_deliveries=tuple(responses),
+        )
+
+    def run_chat_turn(
+        self,
+        task: TelegramTask,
+        create_workspace: bool = True,
+        workspace_policy: WorkspaceReusePolicy = WorkspaceReusePolicy.REUSE,
+        run_bootstrap: bool = True,
+    ) -> Tuple[TelegramChatSession, CodexRunResult]:
+        """Pass one Telegram message into its persistent Codex chat session."""
+
+        session = self._chat_store.get_or_create(task)
+        events: List[TaskEvent] = []
+        runtime = self._chat_runtimes.get(session.session_id)
+
+        workspace = self._workspaces.prepare_workspace_for_id(
+            session.session_id,
+            task_id=session.session_id,
+            policy=workspace_policy,
+            create=create_workspace,
+            run_bootstrap=run_bootstrap,
+        )
+        self._emit_session_event(
+            events,
+            TaskEventType.WORKSPACE_PREPARED,
+            session.session_id,
+            session.session_id,
+            status=workspace.bootstrap_status.value,
+            payload={
+                "workspace_path": str(workspace.path),
+                "created": workspace.created,
+                "reused": workspace.reused,
+                "reuse_policy": workspace.reuse_policy.value,
+                "telegram_chat_id": task.chat_id,
+                "telegram_user_id": task.user_id,
+            },
+        )
+        session = self._chat_store.save(
+            replace(
+                session,
+                workspace_path=str(workspace.path),
+                last_status="running",
+                pending_prompt=None,
+            )
+        )
+        self._save_chat_run_state(session, HarnessRunStatus.RUNNING)
+
+        if runtime is None:
+            runtime = self._chat_runtime_factory(session.thread_id)
+            self._chat_runtimes[session.session_id] = runtime
+
+        prompt = task.text
+        if session.turns_completed == 0 and session.thread_id is None and runtime.pending_request is None:
+            prompt = build_prompt_policy(task).render_prompt()
+            self._emit_session_event(
+                events,
+                TaskEventType.PROMPT_BUILT,
+                session.session_id,
+                session.session_id,
+                payload={"policy": "initial_chat_prompt"},
+            )
+
+        invocation = self._planner.plan(workspace, prompt)
+        self._emit_session_event(
+            events,
+            TaskEventType.CODEX_TURN_STARTED,
+            session.session_id,
+            session.session_id,
+            turn_number=session.turns_completed + 1,
+        )
+
+        observed_runtime_events: List[CodexRuntimeEvent] = []
+
+        def on_runtime_event(event: CodexRuntimeEvent) -> None:
+            observed_runtime_events.append(event)
+            self._emit_runtime_event_for_ids(
+                events,
+                session.session_id,
+                session.session_id,
+                session.turns_completed + 1,
+                event,
+            )
+
+        run_result = runtime.run_turn(invocation, on_event=on_runtime_event)
+        for runtime_event in run_result.events[len(observed_runtime_events) :]:
+            self._emit_runtime_event_for_ids(
+                events,
+                session.session_id,
+                session.session_id,
+                session.turns_completed + 1,
+                runtime_event,
+            )
+
+        completed_turns = session.turns_completed
+        if run_result.status == CodexRunStatus.COMPLETED:
+            completed_turns += 1
+        session_status = _chat_session_status(run_result)
+        session = self._chat_store.save(
+            replace(
+                session,
+                thread_id=run_result.metadata.thread_id or runtime.thread_id or session.thread_id,
+                last_turn_id=run_result.metadata.turn_id or runtime.turn_id,
+                turns_completed=completed_turns,
+                last_status=session_status.value,
+                last_assistant_response=run_result.assistant_response or session.last_assistant_response,
+                pending_prompt=run_result.pending_prompt,
+            )
+        )
+        self._save_chat_run_state(session, session_status)
+        self._emit_session_event(
+            events,
+            TaskEventType.CODEX_TURN_COMPLETED,
+            session.session_id,
+            session.session_id,
+            status=run_result.status.value,
+            message=run_result.error,
+            turn_number=max(1, completed_turns),
+            payload={
+                "thread_id": session.thread_id,
+                "turn_id": session.last_turn_id,
+                "assistant_response": run_result.assistant_response,
+                "pending_prompt": run_result.pending_prompt,
+            },
+        )
+        if run_result.assistant_response:
+            self._emit_session_event(
+                events,
+                TaskEventType.ASSISTANT_RESPONSE,
+                session.session_id,
+                session.session_id,
+                status="completed",
+                message=run_result.assistant_response,
+                turn_number=completed_turns,
+                payload={
+                    "thread_id": session.thread_id,
+                    "turn_id": session.last_turn_id,
+                    "assistant_response": run_result.assistant_response,
+                },
+            )
+        return session, run_result
+
     def _emit(
         self,
         events: List[TaskEvent],
@@ -521,6 +804,30 @@ class VeraHarness:
         event = TaskEvent(
             type=event_type,
             task_id=task.task_id,
+            run_id=run_id,
+            status=status,
+            message=message,
+            turn_number=turn_number,
+            payload=payload or {},
+        )
+        events.append(event)
+        if self._on_event is not None:
+            self._on_event(event)
+
+    def _emit_session_event(
+        self,
+        events: List[TaskEvent],
+        event_type: TaskEventType,
+        task_id: str,
+        run_id: str,
+        status: Optional[str] = None,
+        message: Optional[str] = None,
+        turn_number: Optional[int] = None,
+        payload: Optional[dict[str, object]] = None,
+    ) -> None:
+        event = TaskEvent(
+            type=event_type,
+            task_id=task_id,
             run_id=run_id,
             status=status,
             message=message,
@@ -552,6 +859,46 @@ class VeraHarness:
                 "thread_id": runtime_event.thread_id,
                 "turn_id": runtime_event.turn_id,
             },
+        )
+
+    def _emit_runtime_event_for_ids(
+        self,
+        events: List[TaskEvent],
+        task_id: str,
+        run_id: str,
+        turn_number: int,
+        runtime_event: CodexRuntimeEvent,
+    ) -> None:
+        self._emit_session_event(
+            events,
+            TaskEventType.CODEX_RUNTIME_EVENT,
+            task_id,
+            run_id,
+            status=runtime_event.type.value,
+            message=runtime_event.message,
+            turn_number=turn_number,
+            payload={
+                "method": runtime_event.method,
+                "thread_id": runtime_event.thread_id,
+                "turn_id": runtime_event.turn_id,
+            },
+        )
+
+    def _save_chat_run_state(
+        self,
+        session: TelegramChatSession,
+        status: HarnessRunStatus,
+    ) -> None:
+        self._run_store.save_run(
+            RunState(
+                run_id=session.session_id,
+                task_id=session.session_id,
+                status=status,
+                turns_completed=session.turns_completed,
+                workspace_path=session.workspace_path,
+                last_error=session.pending_prompt if status in {HarnessRunStatus.APPROVAL_REQUIRED, HarnessRunStatus.INPUT_REQUIRED, HarnessRunStatus.FAILED} else None,
+                last_decision="chat",
+            )
         )
 
     def _apply_workspace_retention(
@@ -769,6 +1116,65 @@ def format_telegram_loop(
     return "\n".join(lines)
 
 
+def format_telegram_chat_loop(
+    result: TelegramChatLoopResult,
+    title: str = "Vera Telegram-to-Codex chat loop",
+) -> str:
+    counts = {
+        status: sum(1 for outcome in result.poll_result.outcomes if outcome.status == status)
+        for status in TelegramUpdateStatus
+    }
+    lines = [
+        title,
+        "updates_seen: {}".format(len(result.poll_result.outcomes)),
+        "accepted: {}".format(counts[TelegramUpdateStatus.ACCEPTED]),
+        "rejected: {}".format(counts[TelegramUpdateStatus.REJECTED]),
+        "blocked: {}".format(counts[TelegramUpdateStatus.BLOCKED]),
+        "duplicates: {}".format(counts[TelegramUpdateStatus.DUPLICATE]),
+        "ignored: {}".format(counts[TelegramUpdateStatus.IGNORED]),
+        "queued_messages: {}".format(len(result.poll_result.queued_tasks)),
+        "chat_turns: {}".format(len(result.chat_turns)),
+        "",
+        "chat_session_log:",
+    ]
+    if not result.chat_turns:
+        lines.append("- none")
+    for turn in result.chat_turns:
+        metadata = turn.run_result.metadata
+        lines.extend(
+            [
+                "- session_id: {}".format(turn.session.session_id),
+                "  telegram_chat_id: {}".format(turn.task.chat_id),
+                "  telegram_user_id: {}".format(turn.task.user_id),
+                "  telegram_update_id: {}".format(_display_optional(turn.update_id)),
+                "  telegram_message_id: {}".format(turn.task.message_id),
+                "  workspace_path: {}".format(_display_optional(turn.session.workspace_path)),
+                "  codex_thread_id: {}".format(_display_optional(metadata.thread_id)),
+                "  codex_turn_id: {}".format(_display_optional(metadata.turn_id)),
+                "  codex_status: {}".format(turn.run_result.status.value),
+                "  last_status: {}".format(turn.session.last_status),
+                "  assistant_response: {}".format(_compact_log_value(turn.run_result.assistant_response)),
+            ]
+        )
+
+    lines.extend(["", "telegram_chat_responses:"])
+    if not result.response_deliveries:
+        lines.append("- none")
+    for delivery in result.response_deliveries:
+        lines.extend(
+            [
+                "- status: {}".format(delivery.status.value),
+                "  session_id: {}".format(delivery.session_id),
+                "  task_id: {}".format(delivery.task_id),
+                "  telegram_chat_id: {}".format(delivery.chat_id),
+                "  telegram_update_id: {}".format(_display_optional(delivery.update_id)),
+                "  telegram_message_id: {}".format(delivery.message_id),
+                "  telegram_text: {}".format(_compact_log_value(delivery.text)),
+            ]
+        )
+    return "\n".join(lines)
+
+
 def _telegram_status_for_result(
     result: TaskRunResult,
 ) -> Tuple[TelegramTaskStatus, Optional[str]]:
@@ -778,6 +1184,33 @@ def _telegram_status_for_result(
     if status == HarnessRunStatus.FAILED:
         return TelegramTaskStatus.FAILED, result.final_decision.reason
     return TelegramTaskStatus.BLOCKED, result.final_decision.reason
+
+
+def _telegram_chat_response_for_result(result: CodexRunResult) -> Tuple[TelegramTaskStatus, str]:
+    if result.status == CodexRunStatus.COMPLETED and result.assistant_response:
+        return TelegramTaskStatus.COMPLETED, result.assistant_response
+    if result.status == CodexRunStatus.APPROVAL_REQUIRED:
+        return TelegramTaskStatus.BLOCKED, result.pending_prompt or result.error or "Codex requested approval."
+    if result.status == CodexRunStatus.INPUT_REQUIRED:
+        return TelegramTaskStatus.BLOCKED, result.pending_prompt or result.error or "Codex requested input."
+    if result.status == CodexRunStatus.COMPLETED:
+        return TelegramTaskStatus.COMPLETED, "Codex completed the turn without a user-facing response."
+    return TelegramTaskStatus.FAILED, format_telegram_status(
+        TelegramTaskStatus.FAILED,
+        reason=result.error or "Codex did not complete the chat turn.",
+    )
+
+
+def _chat_session_status(result: CodexRunResult) -> HarnessRunStatus:
+    if result.status == CodexRunStatus.APPROVAL_REQUIRED:
+        return HarnessRunStatus.APPROVAL_REQUIRED
+    if result.status == CodexRunStatus.INPUT_REQUIRED:
+        return HarnessRunStatus.INPUT_REQUIRED
+    if result.status == CodexRunStatus.FAILED:
+        return HarnessRunStatus.FAILED
+    if result.status in {CodexRunStatus.CANCELLED, CodexRunStatus.TIMED_OUT}:
+        return HarnessRunStatus.FAILED
+    return HarnessRunStatus.RUNNING
 
 
 def _status_delivery(

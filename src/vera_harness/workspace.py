@@ -60,19 +60,37 @@ class WorkspaceManager:
     ) -> Workspace:
         """Resolve and prepare a task workspace according to an explicit policy."""
 
-        workspace_id = _safe_workspace_id(task.task_id)
+        return self.prepare_workspace_for_id(
+            workspace_id=task.task_id,
+            task_id=task.task_id,
+            policy=policy,
+            create=create,
+            run_bootstrap=run_bootstrap,
+        )
+
+    def prepare_workspace_for_id(
+        self,
+        workspace_id: str,
+        task_id: str,
+        policy: WorkspaceReusePolicy = WorkspaceReusePolicy.REUSE,
+        create: bool = True,
+        run_bootstrap: bool = True,
+    ) -> Workspace:
+        """Resolve and prepare a managed workspace with an explicit stable id."""
+
+        safe_workspace_id = _safe_workspace_id(workspace_id)
         if create:
             self._ensure_root()
         elif self._root.exists() and not self._root.is_dir():
             raise WorkspaceError("workspace root is not a directory: {}".format(self._root))
-        path = self._workspace_path(workspace_id)
+        path = self._workspace_path(safe_workspace_id)
         exists = path.exists()
 
         if exists and policy == WorkspaceReusePolicy.FRESH:
             self.cleanup_workspace_path(path)
             exists = False
         elif not exists and policy == WorkspaceReusePolicy.REQUIRE_EXISTING:
-            raise WorkspaceError("workspace does not exist for task: {}".format(task.task_id))
+            raise WorkspaceError("workspace does not exist for task: {}".format(task_id))
 
         if create and not exists:
             path.mkdir(parents=False, exist_ok=False)
@@ -90,8 +108,8 @@ class WorkspaceManager:
                 raise WorkspaceError("workspace path resolves through a symlink: {}".format(path))
 
         workspace = self._workspace(
-            workspace_id=workspace_id,
-            task=task,
+            workspace_id=safe_workspace_id,
+            task_id=task_id,
             path=path,
             created=created,
             reused=reused,
@@ -156,7 +174,7 @@ class WorkspaceManager:
     def _workspace(
         self,
         workspace_id: str,
-        task: TelegramTask,
+        task_id: str,
         path: Path,
         created: bool,
         reused: bool,
@@ -169,7 +187,7 @@ class WorkspaceManager:
     ) -> Workspace:
         return Workspace(
             workspace_id=workspace_id,
-            task_id=task.task_id,
+            task_id=task_id,
             root=self._root,
             path=path,
             created=created,

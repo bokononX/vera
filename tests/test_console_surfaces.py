@@ -110,13 +110,13 @@ class ConsoleSurfaceTests(unittest.TestCase):
             def __init__(self, config, on_event=None):
                 self._on_event = on_event
 
-            def run_telegram_poll_once(self):
+            def run_telegram_chat_poll_once(self):
                 calls.append("poll")
                 started.set()
                 time.sleep(0.01)
 
                 class Result:
-                    status_deliveries = ()
+                    response_deliveries = ()
 
                 return Result()
 
@@ -130,6 +130,7 @@ class ConsoleSurfaceTests(unittest.TestCase):
                 "VERA_ALLOWED_CHAT_IDS": "100",
                 "VERA_CODEX_APP_SERVER_COMMAND": "python3 -m fake_codex_server",
                 "VERA_RUN_STATE_PATH": str(Path(temp_dir, "run-state.json")),
+                "VERA_CHAT_SESSION_STATE_PATH": str(Path(temp_dir, "chat-sessions.json")),
                 "VERA_EVENT_LOG_PATH": str(Path(temp_dir, "events.jsonl")),
                 "VERA_TELEGRAM_STATE_PATH": str(Path(temp_dir, "telegram-state.json")),
             }

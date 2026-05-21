@@ -41,6 +41,7 @@ class TaskEventType(str, Enum):
     CODEX_RUNTIME_EVENT = "codex_runtime_event"
     CODEX_TURN_COMPLETED = "codex_turn_completed"
     DECISION_RECORDED = "decision_recorded"
+    ASSISTANT_RESPONSE = "assistant_response"
     RETRY_SCHEDULED = "retry_scheduled"
     RUN_COMPLETED = "run_completed"
     RUN_BLOCKED = "run_blocked"

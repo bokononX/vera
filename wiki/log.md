@@ -26,3 +26,6 @@
 - 2026-05-20: Updated the Vera harness concept with Codex app-server readiness
   validation before live task acceptance and command/path diagnostic
   constraints.
+- 2026-05-21: Updated the Vera harness concept with persistent Telegram chat
+  session state, app-server thread reuse/resume, assistant-response Telegram
+  replies, and chat-mode observability constraints.

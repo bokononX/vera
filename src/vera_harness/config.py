@@ -82,6 +82,7 @@ class HarnessConfig:
     telegram_state_path: Path
     telegram_unauthorized_response: Optional[str]
     run_state_path: Path
+    chat_session_state_path: Path
     event_log_path: Path
     budget_snapshot_path: Optional[Path]
     monthly_budget_usd: Optional[float]
@@ -190,6 +191,9 @@ class HarnessConfig:
         run_state_path = Path(
             source.get("VERA_RUN_STATE_PATH", "./.vera/run_state.json")
         ).expanduser().resolve()
+        chat_session_state_path = Path(
+            source.get("VERA_CHAT_SESSION_STATE_PATH", "./.vera/chat_sessions.json")
+        ).expanduser().resolve()
         event_log_path = Path(
             source.get("VERA_EVENT_LOG_PATH", "./.vera/events.jsonl")
         ).expanduser().resolve()
@@ -280,6 +284,7 @@ class HarnessConfig:
             telegram_state_path=telegram_state_path,
             telegram_unauthorized_response=telegram_unauthorized_response,
             run_state_path=run_state_path,
+            chat_session_state_path=chat_session_state_path,
             event_log_path=event_log_path,
             budget_snapshot_path=budget_snapshot_path,
             monthly_budget_usd=monthly_budget_usd,
