@@ -259,6 +259,8 @@ def _format_config_check(config: HarnessConfig) -> str:
             "telegram_request_timeout_seconds: {}".format(config.telegram_request_timeout_seconds),
             "telegram_state_path: {}".format(config.telegram_state_path),
             "telegram_unauthorized_response: {}".format(unauthorized),
+            "owner_identity: {}".format(_format_owner_identity(config)),
+            "owner_profile_source: {}".format(_format_owner_profile_source(config)),
             "chat_session_state_path: {}".format(config.chat_session_state_path),
             "identity_profile_path: {}".format(config.identity_profile_path),
             "identity_interview_state_path: {}".format(config.identity_interview_state_path),
@@ -277,6 +279,22 @@ def _display_optional_config(value: object) -> str:
     if value is None:
         return "<not configured>"
     return str(value)
+
+
+def _format_owner_identity(config: HarnessConfig) -> str:
+    if config.owner_profile is None:
+        return "<not configured>"
+    return config.owner_profile.redacted_identity_label()
+
+
+def _format_owner_profile_source(config: HarnessConfig) -> str:
+    if config.owner_profile is None:
+        return "<not configured>"
+    if config.owner_profile.wiki_profile_path is not None:
+        return str(config.owner_profile.wiki_profile_path)
+    if config.owner_profile.has_profile_content:
+        return "local owner config"
+    return "<empty>"
 
 
 def _validate_codex_app_server_command(config: HarnessConfig) -> CommandResolution:

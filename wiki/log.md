@@ -34,3 +34,6 @@
 - 2026-05-21: Updated the Vera harness concept with persistent Telegram chat
   session state, app-server thread reuse/resume, assistant-response Telegram
   replies, and chat-mode observability constraints.
+- 2026-05-21: Updated the Vera harness concept with primary owner identity,
+  refreshable owner profile prompts, owner/non-owner session separation,
+  safety-boundary constraints, and redacted console identity visibility.

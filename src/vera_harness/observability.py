@@ -115,6 +115,8 @@ class AgentSnapshot:
     updated_seconds_ago: int
     token_usage: Optional[int] = None
     budget_usd: Optional[float] = None
+    session_identity: Optional[str] = None
+    session_identity_label: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -326,6 +328,8 @@ def fake_observability_provider() -> StaticObservabilityProvider:
         updated_seconds_ago=4,
         token_usage=3120,
         budget_usd=0.19,
+        session_identity="owner",
+        session_identity_label="primary owner: Vera Owner (Telegram user_id 200)",
     )
     idle_agent = AgentSnapshot(
         agent_id="telegram-100-301:run-telegram-100-301-1",
@@ -338,6 +342,8 @@ def fake_observability_provider() -> StaticObservabilityProvider:
         turns_completed=1,
         age_seconds=780,
         updated_seconds_ago=420,
+        session_identity="authorized_user",
+        session_identity_label="authorized Telegram user_id 201",
     )
     raw_events = (
         ConsoleEvent(
@@ -354,6 +360,7 @@ def fake_observability_provider() -> StaticObservabilityProvider:
                 {
                     "telegram_message_text": "Please deploy with token sk-live-secret",
                     "telegram_bot_token": "12345:secret-bot-token",
+                    "owner_profile": "Raw owner values and communication preferences should stay hidden.",
                 }
             ),
         ),
@@ -730,6 +737,8 @@ def _agent_snapshot(
     ]
     token_usage = _latest_int_detail(agent_events, ("total_tokens", "tokens", "token_count"))
     budget_usd = _latest_float_detail(agent_events, ("cost_usd", "budget_usd"))
+    session_identity = _latest_string_detail(agent_events, ("session_identity",))
+    session_identity_label = _latest_string_detail(agent_events, ("session_identity_label",))
     current_turn = state.turns_completed
     if state.status in {HarnessRunStatus.PLANNED, HarnessRunStatus.RUNNING}:
         current_turn = max(1, state.turns_completed + 1)
@@ -746,6 +755,8 @@ def _agent_snapshot(
         updated_seconds_ago=max(0, int((now - _aware(state.updated_at)).total_seconds())),
         token_usage=token_usage,
         budget_usd=budget_usd,
+        session_identity=session_identity,
+        session_identity_label=session_identity_label,
     )
 
 
@@ -1067,11 +1078,16 @@ _PRIVATE_BODY_KEYS = {
     "content",
     "message_body",
     "message_text",
+    "owner_profile",
+    "owner_profile_excerpt",
     "prompt",
+    "profile",
+    "profile_excerpt",
     "raw_body",
     "raw_content",
     "raw_message",
     "raw_text",
     "task_text",
     "telegram_message_text",
+    "wiki_profile_excerpt",
 }
