@@ -16,6 +16,7 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 from .chat import ChatSessionStateError
 from .codex import CodexAppServerError
 from .config import CommandResolution, ConfigError, HarnessConfig
+from .models import TelegramTask
 from .orchestrator import (
     FakeCodexRuntime,
     VeraHarness,
@@ -26,6 +27,15 @@ from .orchestrator import (
 )
 from .state import RunStateError
 from .telegram import TelegramApiError, TelegramLongPollingIntake, TelegramUpdateStore
+from .user_memory import (
+    IngestOptions,
+    SourceRetention,
+    UserMemoryIngestError,
+    ingest_user_memory,
+    load_messages_from_file,
+    messages_from_telegram_tasks,
+    parse_datetime,
+)
 from .workspace import WorkspaceError
 
 
@@ -70,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--console-gui",
         action="store_true",
         help="Launch the local Vera web console.",
+    )
+    parser.add_argument(
+        "--ingest-user-memory",
+        action="store_true",
+        help="Extract conversation memories and propose or apply user-memory wiki updates.",
     )
     parser.add_argument(
         "--console-fake-state",
@@ -144,6 +159,47 @@ def build_parser() -> argparse.ArgumentParser:
         default=2.0,
         help="Sleep between --monitor polling cycles. Defaults to 2 seconds.",
     )
+    parser.add_argument(
+        "--conversation-file",
+        default=None,
+        help="Transcript text or normalized Telegram JSON file to ingest into user memory.",
+    )
+    parser.add_argument(
+        "--memory-root",
+        default="./memory/users/default",
+        help="User-memory corpus root. Defaults to ./memory/users/default.",
+    )
+    parser.add_argument(
+        "--memory-user-id",
+        default="default",
+        help="Owner user id written to user-memory wiki frontmatter.",
+    )
+    parser.add_argument(
+        "--memory-source-channel",
+        default="codex",
+        help="Source channel label for the ingest, for example codex or telegram.",
+    )
+    parser.add_argument(
+        "--memory-source-id",
+        default=None,
+        help="Optional stable source id. Defaults to a deterministic date/channel/hash id.",
+    )
+    parser.add_argument(
+        "--memory-source-retention",
+        choices=[item.value for item in SourceRetention],
+        default=SourceRetention.HASH_ONLY.value,
+        help="Whether to store raw source text or retain only hashes/redaction metadata.",
+    )
+    parser.add_argument(
+        "--apply-memory-ingest",
+        action="store_true",
+        help="Apply the proposed user-memory wiki edits. Omit for dry-run review mode.",
+    )
+    parser.add_argument(
+        "--captured-at",
+        default=None,
+        help="ISO-8601 captured timestamp for deterministic ingest output.",
+    )
     return parser
 
 
@@ -160,14 +216,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.live_smoke,
         args.console_tui,
         args.console_gui,
+        args.ingest_user_memory,
     ]
     if sum(1 for selected in selected_modes if selected) > 1:
         parser.error(
-            "choose only one mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, or --check-config"
+            "choose only one mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, or --check-config"
         )
     if not any(selected_modes):
         parser.error(
-            "choose a mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, or --check-config"
+            "choose a mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, or --check-config"
         )
     if args.max_poll_cycles is not None and args.max_poll_cycles <= 0:
         parser.error("--max-poll-cycles must be greater than zero")
@@ -177,8 +234,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--console-port must be zero or greater")
     if args.console_view_only and not args.console_tui:
         parser.error("--console-view-only requires --console-tui")
+    if args.apply_memory_ingest and not args.ingest_user_memory:
+        parser.error("--apply-memory-ingest requires --ingest-user-memory")
 
     try:
+        if args.ingest_user_memory:
+            return _run_user_memory_ingest(args)
         config = HarnessConfig.load(
             require_secrets=args.poll_once or args.check_config or args.monitor or args.live_smoke,
             telegram_config_path=args.telegram_config,
@@ -230,6 +291,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         PermissionError,
         RunStateError,
         TelegramApiError,
+        UserMemoryIngestError,
         ValueError,
         WorkspaceError,
     ) as exc:
@@ -240,6 +302,43 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 130
 
     print(format_dry_run(result))
+    return 0
+
+
+def _run_user_memory_ingest(args: argparse.Namespace) -> int:
+    captured_at = parse_datetime(args.captured_at) if args.captured_at else None
+    source_retention = SourceRetention(args.memory_source_retention)
+    if args.conversation_file is not None:
+        conversation_path = Path(args.conversation_file).expanduser().resolve()
+        messages, source_text = load_messages_from_file(
+            conversation_path,
+            channel=args.memory_source_channel,
+        )
+    else:
+        task = TelegramTask.from_message(
+            chat_id=args.chat_id,
+            user_id=args.user_id,
+            message_id=args.message_id,
+            text=args.message,
+            username=args.username,
+            received_at=captured_at,
+        )
+        messages = messages_from_telegram_tasks((task,))
+        source_text = args.message
+    plan = ingest_user_memory(
+        messages=messages,
+        source_text=source_text,
+        options=IngestOptions(
+            root=Path(args.memory_root).expanduser().resolve(),
+            owner_user=args.memory_user_id,
+            channel=args.memory_source_channel,
+            source_id=args.memory_source_id,
+            captured_at=captured_at,
+            source_retention=source_retention,
+        ),
+        apply=args.apply_memory_ingest,
+    )
+    print(plan.format_human_readable())
     return 0
 
 

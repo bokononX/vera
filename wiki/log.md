@@ -1,5 +1,9 @@
 # Change log
 
+- 2026-05-21: Updated the Herald user memory concept with the implemented
+  deterministic conversation/Telegram JSON ingest path, dry-run/apply behavior,
+  hash-only source retention default, index/log maintenance, and contradiction
+  review handling.
 - 2026-05-21: Updated the Vera harness concept with first-class assistant
   identity, local assistant profile configuration, assistant identity interview
   support, prompt injection before Codex self-description, runtime transparency,

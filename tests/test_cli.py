@@ -214,6 +214,38 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("VERA_CODEX_APP_SERVER_COMMAND executable not found on PATH", stderr.getvalue())
 
+    def test_user_memory_ingest_dry_run_does_not_require_live_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            conversation_path = Path(temp_dir, "conversation.txt")
+            memory_root = Path(temp_dir, "memory")
+            conversation_path.write_text(
+                "User: I prefer concise engineering updates.\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {}, clear=True):
+                with contextlib.redirect_stdout(stdout):
+                    status = cli.main(
+                        [
+                            "--ingest-user-memory",
+                            "--conversation-file",
+                            str(conversation_path),
+                            "--memory-root",
+                            str(memory_root),
+                            "--memory-user-id",
+                            "user-test",
+                            "--captured-at",
+                            "2026-05-21T00:00:00Z",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("User memory ingest plan (dry-run)", rendered)
+        self.assertIn("wiki/preferences/concise-engineering-updates.md", rendered)
+        self.assertFalse(memory_root.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
