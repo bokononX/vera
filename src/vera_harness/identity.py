@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 from uuid import uuid4
 
 from .chat import session_id_for_telegram
-from .models import TelegramTask
+from .models import AssistantIdentity, TelegramTask
 
 
 PROFILE_SCHEMA_VERSION = 1
@@ -545,13 +545,20 @@ class IdentityInterviewController:
 def render_chat_prompt_with_profile(
     user_message: str,
     owner_profile: Tuple[str, ...],
+    assistant_identity: Optional[AssistantIdentity] = None,
 ) -> str:
-    """Wrap a follow-up chat message with confirmed owner profile guidance."""
+    """Wrap a follow-up chat message with assistant identity and owner guidance."""
 
-    if not owner_profile:
+    if assistant_identity is None and not owner_profile:
         return user_message
-    lines = ["Owner profile guidance for this turn:"]
-    lines.extend(owner_profile)
+    lines = []
+    if assistant_identity is not None:
+        lines.extend(assistant_identity.prompt_lines())
+    if owner_profile:
+        if lines:
+            lines.append("")
+        lines.append("Owner profile guidance for this turn:")
+        lines.extend(owner_profile)
     lines.extend(["", "Telegram message:", user_message])
     return "\n".join(lines)
 

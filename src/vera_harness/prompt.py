@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from .models import OwnerProfile, TelegramTask
+from .models import AssistantIdentity, OwnerProfile, TelegramTask
 
 
 @dataclass(frozen=True)
@@ -13,6 +13,7 @@ class PromptPolicy:
     """Policy summary and prompt text for a Codex run."""
 
     task: TelegramTask
+    assistant_identity: AssistantIdentity
     identity_constraints: Tuple[str, ...]
     cat_131_principles: Tuple[str, ...]
     operating_limits: Tuple[str, ...]
@@ -23,7 +24,8 @@ class PromptPolicy:
     @property
     def summary_lines(self) -> Tuple[str, ...]:
         return (
-            self.identity_constraints
+            self.assistant_identity.summary_lines()
+            + self.identity_constraints
             + self.owner_profile_summary_lines
             + self.cat_131_principles
             + self.operating_limits
@@ -92,14 +94,30 @@ class PromptPolicy:
 
     def render_prompt(self) -> str:
         sections = [
-            "You are Herald, a faithful representative of the Telegram user.",
-            "You operate inside The Place coordination layer and must respect Vera protocol constraints.",
+            "You are {}, the configured assistant identity for this Telegram session.".format(
+                self.assistant_identity.safe_display_name
+            ),
+            "Use the assistant identity below before any default runtime self-description.",
             "",
-            "Task:",
-            self.task.text,
-            "",
-            "Identity constraints:",
         ]
+        sections.extend(self.assistant_identity.prompt_lines())
+        sections.extend(
+            [
+                "",
+                "Protocol context:",
+                "Herald is the faithful representative role for the Telegram user.",
+                "The Place is the coordination layer; Vera protocol constraints govern trust, disclosure, and verification.",
+            ]
+        )
+        sections.extend(
+            [
+                "",
+                "Task:",
+                self.task.text,
+                "",
+                "Identity constraints:",
+            ]
+        )
         sections.extend("- {}".format(item) for item in self.identity_constraints)
         if self.owner_profile_lines:
             sections.extend(["", "Owner relationship:"])
@@ -126,6 +144,7 @@ class PromptPolicy:
 
 def build_prompt_policy(
     task: TelegramTask,
+    assistant_identity: Optional[AssistantIdentity] = None,
     owner_profile: Optional[OwnerProfile] = None,
     owner_profile_facts: Tuple[str, ...] = (),
 ) -> PromptPolicy:
@@ -137,7 +156,9 @@ def build_prompt_policy(
     )
     return PromptPolicy(
         task=task,
+        assistant_identity=assistant_identity or AssistantIdentity.default(),
         identity_constraints=(
+            "Use the configured assistant identity as the user-facing identity; Codex/OpenAI is runtime/tooling, not the normal self-concept.",
             "Herald advocates for the user without pretending to be the user or making final human value judgments.",
             "The Place is the coordination environment: reduce avoidable confusion, social friction, and unnecessary blame before humans engage.",
             "Vera is the protocol state underneath the work: preserve trust, verification discipline, governance boundaries, and context-specific disclosure.",

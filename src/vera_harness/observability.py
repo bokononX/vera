@@ -115,6 +115,7 @@ class AgentSnapshot:
     updated_seconds_ago: int
     token_usage: Optional[int] = None
     budget_usd: Optional[float] = None
+    assistant_identity_name: Optional[str] = None
     session_identity: Optional[str] = None
     session_identity_label: Optional[str] = None
 
@@ -328,6 +329,7 @@ def fake_observability_provider() -> StaticObservabilityProvider:
         updated_seconds_ago=4,
         token_usage=3120,
         budget_usd=0.19,
+        assistant_identity_name="Vera",
         session_identity="owner",
         session_identity_label="primary owner: Vera Owner (Telegram user_id 200)",
     )
@@ -342,6 +344,7 @@ def fake_observability_provider() -> StaticObservabilityProvider:
         turns_completed=1,
         age_seconds=780,
         updated_seconds_ago=420,
+        assistant_identity_name="Vera",
         session_identity="authorized_user",
         session_identity_label="authorized Telegram user_id 201",
     )
@@ -739,6 +742,7 @@ def _agent_snapshot(
     budget_usd = _latest_float_detail(agent_events, ("cost_usd", "budget_usd"))
     session_identity = _latest_string_detail(agent_events, ("session_identity",))
     session_identity_label = _latest_string_detail(agent_events, ("session_identity_label",))
+    assistant_identity_name = _latest_string_detail(agent_events, ("assistant_identity_name",))
     current_turn = state.turns_completed
     if state.status in {HarnessRunStatus.PLANNED, HarnessRunStatus.RUNNING}:
         current_turn = max(1, state.turns_completed + 1)
@@ -755,6 +759,7 @@ def _agent_snapshot(
         updated_seconds_ago=max(0, int((now - _aware(state.updated_at)).total_seconds())),
         token_usage=token_usage,
         budget_usd=budget_usd,
+        assistant_identity_name=assistant_identity_name,
         session_identity=session_identity,
         session_identity_label=session_identity_label,
     )

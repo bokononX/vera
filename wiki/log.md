@@ -1,5 +1,9 @@
 # Change log
 
+- 2026-05-21: Updated the Vera harness concept with first-class assistant
+  identity, local assistant profile configuration, assistant identity interview
+  support, prompt injection before Codex self-description, runtime transparency,
+  and console assistant-name display.
 - 2026-05-21: Added the Herald user memory concept and linked the detailed
   user-memory wiki schema design.
 - 2026-05-21: Updated the Vera harness concept with confirmed owner

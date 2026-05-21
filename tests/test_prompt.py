@@ -1,6 +1,6 @@
 import unittest
 
-from vera_harness.models import OwnerProfile, TelegramTask
+from vera_harness.models import AssistantIdentity, OwnerProfile, TelegramTask
 from vera_harness.prompt import build_prompt_policy
 
 
@@ -16,6 +16,12 @@ class PromptPolicyTests(unittest.TestCase):
         prompt = build_prompt_policy(task).render_prompt()
 
         required_fragments = [
+            "You are Vera",
+            "Assistant identity:",
+            "User-facing assistant name: Vera",
+            "personal assistant/minime",
+            "Self-identification rule",
+            "Codex/OpenAI tooling is the runtime layer",
             "Herald",
             "faithful representative",
             "The Place",
@@ -35,6 +41,32 @@ class PromptPolicyTests(unittest.TestCase):
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, prompt)
+        self.assertNotEqual(prompt.splitlines()[0], "You are Herald, a faithful representative of the Telegram user.")
+
+    def test_configured_assistant_identity_override_renders_before_task(self):
+        task = TelegramTask.from_message(
+            chat_id=1,
+            user_id=2,
+            message_id=3,
+            text="who are you?",
+        )
+        identity = AssistantIdentity(
+            name="Mira",
+            short_description="a focused thinking partner",
+            mission="Help Victor reason clearly.",
+            core_values=("truth",),
+            communication_principles=("brief and candid",),
+            transparency_rules=("say Codex/OpenAI is runtime when asked",),
+            relationship_to_owner="Help the owner as a configured assistant.",
+        )
+
+        prompt = build_prompt_policy(task, assistant_identity=identity).render_prompt()
+
+        self.assertLess(prompt.index("User-facing assistant name: Mira"), prompt.index("Task:"))
+        self.assertIn("Mission: Help Victor reason clearly.", prompt)
+        self.assertIn("Communication principles: brief and candid", prompt)
+        self.assertIn("do not default to `I am Codex`", prompt)
+        self.assertNotIn("Human identity label:", prompt)
 
     def test_owner_profile_renders_only_for_matching_telegram_user(self):
         owner = OwnerProfile(
@@ -65,6 +97,7 @@ class PromptPolicyTests(unittest.TestCase):
         owner_policy = build_prompt_policy(owner_task, owner_profile=owner)
         other_prompt = build_prompt_policy(other_task, owner_profile=owner).render_prompt()
 
+        self.assertIn("Assistant identity:", owner_prompt)
         self.assertIn("Owner relationship:", owner_prompt)
         self.assertIn("Primary owner Telegram user_id: 200", owner_prompt)
         self.assertIn("direct and concrete", owner_prompt)

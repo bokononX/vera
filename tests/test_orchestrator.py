@@ -382,7 +382,9 @@ class TelegramChatSessionTests(unittest.TestCase):
 
             self.assertEqual([message["text"] for message in api.sent_messages], ["Hello from persistent Codex.", "You said hello."])
             self.assertEqual(runtime.calls, 2)
-            self.assertEqual(runtime.prompts[1], "what did I just say?")
+            self.assertIn("User-facing assistant name: Vera", runtime.prompts[0])
+            self.assertIn("Assistant identity:", runtime.prompts[1])
+            self.assertIn("Telegram message:\nwhat did I just say?", runtime.prompts[1])
             self.assertEqual(result.chat_turns[0].session.session_id, result.chat_turns[1].session.session_id)
             self.assertEqual(result.chat_turns[1].session.thread_id, "thread-1")
             self.assertEqual(result.chat_turns[1].session.turns_completed, 2)
@@ -390,6 +392,125 @@ class TelegramChatSessionTests(unittest.TestCase):
             state = Path(config.chat_session_state_path).read_text(encoding="utf-8")
             self.assertIn("thread-1", state)
             self.assertIn("telegram-chat-100-user-200", state)
+
+    def test_who_are_you_returns_assistant_identity_without_codex_leak(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                },
+            )
+            api = FakeTelegramApi(
+                (_message_update(update_id=83, chat_id=100, user_id=200, message_id=300, text="who are you?"),)
+            )
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+                send_accepted_reply=False,
+            )
+            runtime = ScriptedChatRuntime(("I am Codex, a coding-focused AI assistant.",))
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: runtime)
+
+            result = harness.run_telegram_chat_poll_once(
+                polling_intake=intake,
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(runtime.calls, 0)
+            self.assertEqual(len(result.chat_turns), 0)
+            response = api.sent_messages[0]["text"]
+            self.assertIn("I'm Vera", response)
+            self.assertIn("My mission is to help the owner think clearly", response)
+            self.assertNotIn("I'm Codex", response)
+            self.assertNotIn("coding-focused AI assistant", response)
+
+    def test_runtime_identity_question_preserves_codex_transparency(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                },
+            )
+            api = FakeTelegramApi(
+                (_message_update(update_id=84, chat_id=100, user_id=200, message_id=300, text="are you Codex?"),)
+            )
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+                send_accepted_reply=False,
+            )
+            runtime = ScriptedChatRuntime(("unused",))
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: runtime)
+
+            harness.run_telegram_chat_poll_once(
+                polling_intake=intake,
+                run_bootstrap=False,
+            )
+
+            response = api.sent_messages[0]["text"]
+            self.assertIn("I'm Vera", response)
+            self.assertIn("Codex/OpenAI tooling is the runtime layer", response)
+            self.assertIn("not my normal user-facing identity", response)
+
+    def test_assistant_identity_interview_updates_future_prompt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                },
+            )
+            texts = (
+                "/assistant identity",
+                "Mira",
+                "a focused thinking partner",
+                "Help Victor reason clearly and remember durable context.",
+                "truth; agency; low drama",
+                "brief, precise, and candid",
+                "Never claim to be human; ask before irreversible actions",
+                "A configured assistant for the owner.",
+                "Proactive about risks; quiet when scope is narrow",
+                "Use owner profile only for the configured owner",
+                "Say Mira is powered by Codex/OpenAI when asked",
+                "confirm",
+                "Use the new assistant identity on this task.",
+            )
+            api = FakeTelegramApi(_message_updates(190, texts))
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+                send_accepted_reply=False,
+            )
+            runtime = ScriptedChatRuntime(("Mira-shaped response.",))
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: runtime)
+
+            result = harness.run_telegram_chat_poll_once(
+                polling_intake=intake,
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(runtime.calls, 1)
+            self.assertEqual(len(result.chat_turns), 1)
+            self.assertIn("Assistant identity 1/10", api.sent_messages[0]["text"])
+            self.assertIn("Here is the assistant identity profile", api.sent_messages[10]["text"])
+            self.assertIn("Saved assistant identity for Mira", api.sent_messages[11]["text"])
+            self.assertEqual(api.sent_messages[12]["text"], "Mira-shaped response.")
+            self.assertIn("User-facing assistant name: Mira", runtime.prompts[0])
+            self.assertIn("Mission: Help Victor reason clearly", runtime.prompts[0])
+            self.assertIn("Communication principles: brief, precise, and candid", runtime.prompts[0])
+
+            profile = json.loads(Path(config.assistant_identity_path).read_text(encoding="utf-8"))
+            self.assertEqual(profile["name"], "Mira")
+            self.assertEqual(profile["core_values"], ["truth", "agency", "low drama"])
+            self.assertIn("Codex/OpenAI", profile["transparency_rules"][0])
 
     def test_owner_chat_session_receives_owner_profile_prompt(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -783,6 +904,10 @@ def _config(temp_dir, extra_env=None, owner_config=None):
         "VERA_WORKSPACE_ROOT": temp_dir,
         "VERA_RUN_STATE_PATH": str(Path(temp_dir, "run-state.json")),
         "VERA_CHAT_SESSION_STATE_PATH": str(Path(temp_dir, "chat-sessions.json")),
+        "VERA_ASSISTANT_IDENTITY_PATH": str(Path(temp_dir, "assistant-identity.json")),
+        "VERA_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH": str(
+            Path(temp_dir, "assistant-identity-interviews.json")
+        ),
         "VERA_IDENTITY_PROFILE_PATH": str(Path(temp_dir, "identity-profile.json")),
         "VERA_IDENTITY_INTERVIEW_STATE_PATH": str(Path(temp_dir, "identity-interviews.json")),
         "VERA_TELEGRAM_STATE_PATH": str(Path(temp_dir, "telegram-state.json")),

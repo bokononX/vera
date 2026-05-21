@@ -70,7 +70,10 @@ def render_tui_frame(
         )
         lines.append(
             _clip(
-                "  identity {}".format(agent.session_identity_label or "unknown session identity"),
+                "  assistant {} | identity {}".format(
+                    agent.assistant_identity_name or "unknown assistant",
+                    agent.session_identity_label or "unknown session identity",
+                ),
                 usable_width,
             )
         )
