@@ -368,6 +368,7 @@ def _format_config_check(config: HarnessConfig) -> str:
             "chat_session_state_path: {}".format(config.chat_session_state_path),
             "identity_profile_path: {}".format(config.identity_profile_path),
             "identity_interview_state_path: {}".format(config.identity_interview_state_path),
+            "user_memory_root: {}".format(config.user_memory_root or "<not configured>"),
             "event_log_path: {}".format(config.event_log_path),
             "budget_snapshot_path: {}".format(config.budget_snapshot_path or "<not configured>"),
             "monthly_budget_usd: {}".format(_display_optional_config(config.monthly_budget_usd)),

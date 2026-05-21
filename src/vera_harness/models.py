@@ -349,6 +349,7 @@ class RunState:
     turns_completed: int = 0
     dry_run: bool = False
     workspace_path: Optional[str] = None
+    memory_pages_used: Tuple[str, ...] = ()
     last_error: Optional[str] = None
     last_decision: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

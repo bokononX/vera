@@ -56,6 +56,11 @@ from .telegram import (
     TelegramUpdateStatus,
     format_telegram_status,
 )
+from .user_memory import (
+    UserMemoryPromptContext,
+    UserMemoryRetrievalOptions,
+    retrieve_user_memory_for_task,
+)
 from .workspace import WorkspaceBootstrapError, WorkspaceManager
 
 
@@ -269,6 +274,22 @@ class VeraHarness:
             return ()
         return self._identity.profile_prompt_lines()
 
+    def _user_memory_context_for_task(self, task: TelegramTask) -> Optional[UserMemoryPromptContext]:
+        root = self._config.user_memory_root
+        if root is None:
+            return None
+        if self._config.owner_profile is not None and not self._config.owner_profile.matches(task):
+            return None
+        context = retrieve_user_memory_for_task(
+            task,
+            UserMemoryRetrievalOptions(
+                root=root,
+                allow_private=True,
+                allow_restricted=False,
+            ),
+        )
+        return context if context.has_prompt_content else None
+
     def dry_run_task(
         self,
         text: str,
@@ -430,11 +451,17 @@ class VeraHarness:
             payload=workspace_payload,
         )
 
+        user_memory_context = self._user_memory_context_for_task(task)
+        if user_memory_context is not None:
+            state = self._run_store.save_run(
+                replace(state, memory_pages_used=user_memory_context.used_page_refs)
+            )
         policy = build_prompt_policy(
             task,
             assistant_identity=assistant_identity,
             owner_profile=self._config.owner_profile,
             owner_profile_facts=self._owner_profile_facts_for_task(task),
+            user_memory_context=user_memory_context,
         )
         prompt = policy.render_prompt()
         invocation = self._planner.plan(workspace, prompt)
@@ -447,6 +474,9 @@ class VeraHarness:
                 "policy_lines": len(policy.summary_lines),
                 "owner_profile_applied": policy.owner_profile is not None
                 or bool(policy.owner_profile_facts),
+                "user_memory_pages": list(user_memory_context.used_page_refs)
+                if user_memory_context is not None
+                else [],
                 "assistant_identity_name": assistant_identity.safe_display_name,
                 "session_identity": _session_identity(task, self._config.owner_profile),
             },
@@ -797,7 +827,15 @@ class VeraHarness:
                 pending_prompt=None,
             )
         )
-        self._save_chat_run_state(session, HarnessRunStatus.RUNNING)
+        user_memory_context = self._user_memory_context_for_task(task)
+        memory_pages_used = (
+            user_memory_context.used_page_refs if user_memory_context is not None else ()
+        )
+        self._save_chat_run_state(
+            session,
+            HarnessRunStatus.RUNNING,
+            memory_pages_used=memory_pages_used,
+        )
 
         if runtime is None:
             runtime = self._chat_runtime_factory(session.thread_id)
@@ -809,12 +847,15 @@ class VeraHarness:
             owner_profile_facts,
             assistant_identity=assistant_identity,
         )
+        if user_memory_context is not None and user_memory_context.has_prompt_content:
+            prompt = "{}\n\n{}".format(prompt, user_memory_context.render_prompt_block())
         if session.turns_completed == 0 and session.thread_id is None and runtime.pending_request is None:
             policy = build_prompt_policy(
                 task,
                 assistant_identity=assistant_identity,
                 owner_profile=self._config.owner_profile,
                 owner_profile_facts=owner_profile_facts,
+                user_memory_context=user_memory_context,
             )
             prompt = policy.render_prompt()
             self._emit_session_event(
@@ -827,6 +868,7 @@ class VeraHarness:
                     "policy_lines": len(policy.summary_lines),
                     "owner_profile_applied": policy.owner_profile is not None
                     or bool(policy.owner_profile_facts),
+                    "user_memory_pages": list(memory_pages_used),
                     "assistant_identity_name": assistant_identity.safe_display_name,
                     "session_identity": _session_identity(task, self._config.owner_profile),
                 },
@@ -878,7 +920,7 @@ class VeraHarness:
                 pending_prompt=run_result.pending_prompt,
             )
         )
-        self._save_chat_run_state(session, session_status)
+        self._save_chat_run_state(session, session_status, memory_pages_used=memory_pages_used)
         self._emit_session_event(
             events,
             TaskEventType.CODEX_TURN_COMPLETED,
@@ -1009,6 +1051,7 @@ class VeraHarness:
         self,
         session: TelegramChatSession,
         status: HarnessRunStatus,
+        memory_pages_used: Tuple[str, ...] = (),
     ) -> None:
         self._run_store.save_run(
             RunState(
@@ -1017,6 +1060,7 @@ class VeraHarness:
                 status=status,
                 turns_completed=session.turns_completed,
                 workspace_path=session.workspace_path,
+                memory_pages_used=memory_pages_used,
                 last_error=session.pending_prompt if status in {HarnessRunStatus.APPROVAL_REQUIRED, HarnessRunStatus.INPUT_REQUIRED, HarnessRunStatus.FAILED} else None,
                 last_decision="chat",
             )

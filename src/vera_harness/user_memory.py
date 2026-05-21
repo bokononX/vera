@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .models import TelegramTask
 
@@ -42,6 +42,17 @@ class MemoryState(str, Enum):
 class SourceRetention(str, Enum):
     HASH_ONLY = "hash_only"
     STORE = "store"
+
+
+class UserMemoryTaskType(str, Enum):
+    """Broad task scopes used to bias user-memory retrieval."""
+
+    GENERAL = "general"
+    PROJECT_EXECUTION = "project_execution"
+    USER_REPRESENTATION = "user_representation"
+    SOCIAL_COORDINATION = "social_coordination"
+    CORRECTION_HANDLING = "correction_handling"
+    MEMORY_MAINTENANCE = "memory_maintenance"
 
 
 PAGE_DIRECTORIES: Mapping[PageType, str] = {
@@ -77,6 +88,50 @@ SECRET_RE = re.compile(
 
 USER_SPEAKERS = {"user", "human", "owner", "telegram"}
 ASSISTANT_SPEAKERS = {"assistant", "vera", "herald", "codex", "system"}
+
+STOPWORDS = {
+    "a",
+    "about",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "can",
+    "do",
+    "for",
+    "from",
+    "help",
+    "i",
+    "in",
+    "into",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "our",
+    "please",
+    "that",
+    "the",
+    "this",
+    "to",
+    "use",
+    "we",
+    "when",
+    "with",
+    "you",
+}
+
+HIGH_STAKES_TASK_RE = re.compile(
+    r"\b(delete|publish|send|email|sign|pay|buy|sell|transfer|legal|medical|"
+    r"financial|finance|fire|hire|irreversible|credential|password|token|secret)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -257,6 +312,249 @@ class IngestOptions:
     captured_at: Optional[datetime] = None
     source_retention: SourceRetention = SourceRetention.HASH_ONLY
     consent_scope: str = "store"
+
+
+@dataclass(frozen=True)
+class UserMemorySourceRef:
+    """Prompt-safe provenance for one wiki-page claim."""
+
+    source_id: str
+    path: Optional[str] = None
+    locator: Optional[str] = None
+    claim: Optional[str] = None
+    support: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class UserMemoryPage:
+    """A synthesized wiki page loaded for retrieval."""
+
+    id: str
+    title: str
+    page_type: PageType
+    relative_path: str
+    status: str
+    memory_state: str
+    confidence_level: str
+    confidence_score: Optional[float]
+    sensitivity: str
+    prompt_visibility: str
+    review_status: str
+    source_refs: Tuple[UserMemorySourceRef, ...]
+    tags: Tuple[str, ...]
+    related: Tuple[str, ...]
+    contradictions: Tuple[str, ...]
+    corrections: Tuple[str, ...]
+    summary: str
+    body_text: str
+
+    @property
+    def provenance_label(self) -> str:
+        source = self.source_refs[0].source_id if self.source_refs else self.relative_path
+        return "page: {}; source: {}; confidence: {}; sensitivity: {}".format(
+            self.relative_path,
+            source,
+            self.confidence_level,
+            self.sensitivity,
+        )
+
+    @property
+    def audit_ref(self) -> str:
+        return "{}|{}".format(self.id, self.relative_path)
+
+
+@dataclass(frozen=True)
+class UserMemoryRetrievalOptions:
+    """Options controlling prompt retrieval privacy and size."""
+
+    root: Path
+    max_pages: int = 5
+    task_type: Optional[UserMemoryTaskType] = None
+    allow_private: bool = False
+    allow_restricted: bool = False
+
+
+@dataclass(frozen=True)
+class UserMemoryPromptContext:
+    """Bounded, prompt-ready memory context for one task."""
+
+    task_type: UserMemoryTaskType
+    facts: Tuple[str, ...]
+    caveats: Tuple[str, ...]
+    confirmation_constraints: Tuple[str, ...]
+    selected_pages: Tuple[UserMemoryPage, ...]
+    omitted_private_count: int = 0
+    omitted_sensitive_count: int = 0
+    omitted_irrelevant_count: int = 0
+
+    @property
+    def used_page_refs(self) -> Tuple[str, ...]:
+        return tuple(page.audit_ref for page in self.selected_pages)
+
+    @property
+    def has_prompt_content(self) -> bool:
+        return bool(self.facts or self.caveats or self.confirmation_constraints)
+
+    def render_prompt_block(self) -> str:
+        """Render the compact user-memory packet for Codex prompts."""
+
+        if not self.has_prompt_content:
+            return ""
+        lines = [
+            "## User Memory Context",
+            "",
+            "Use only this task-relevant memory. Treat caveats as constraints, not facts.",
+        ]
+        if self.facts:
+            lines.extend(["", "Relevant memory:"])
+            lines.extend("- {}".format(item) for item in self.facts)
+        if self.caveats:
+            lines.extend(["", "Caveats and unresolved memory:"])
+            lines.extend("- {}".format(item) for item in self.caveats)
+        if self.confirmation_constraints:
+            lines.extend(["", "Confirmation constraints:"])
+            lines.extend("- {}".format(item) for item in self.confirmation_constraints)
+        omitted = []
+        if self.omitted_private_count:
+            omitted.append("{} private".format(self.omitted_private_count))
+        if self.omitted_sensitive_count:
+            omitted.append("{} restricted/secret".format(self.omitted_sensitive_count))
+        if self.omitted_irrelevant_count:
+            omitted.append("{} irrelevant".format(self.omitted_irrelevant_count))
+        if omitted:
+            lines.extend(
+                [
+                    "",
+                    "Omitted: {} memory page(s) were not included by privacy or relevance gates.".format(
+                        ", ".join(omitted)
+                    ),
+                ]
+            )
+        return "\n".join(lines)
+
+
+def retrieve_user_memory_for_task(
+    task: TelegramTask,
+    options: UserMemoryRetrievalOptions,
+) -> UserMemoryPromptContext:
+    """Retrieve a bounded, privacy-filtered memory packet for a Telegram task."""
+
+    task_type = options.task_type or infer_user_memory_task_type(task.text)
+    pages = load_user_memory_pages(options.root)
+    query_tokens = _tokenize_for_retrieval(task.text)
+    scored: List[Tuple[float, UserMemoryPage]] = []
+    omitted_private = 0
+    omitted_sensitive = 0
+    omitted_irrelevant = 0
+    relevant_but_gated: List[UserMemoryPage] = []
+
+    for page in pages:
+        if _page_is_deleted_or_unusable(page):
+            continue
+        score = _memory_relevance_score(page, query_tokens, task_type)
+        if score <= 0:
+            omitted_irrelevant += 1
+            continue
+        gate = _privacy_gate(page, options)
+        if gate == "private":
+            omitted_private += 1
+            relevant_but_gated.append(page)
+            continue
+        if gate == "sensitive":
+            omitted_sensitive += 1
+            relevant_but_gated.append(page)
+            continue
+        scored.append((score, page))
+
+    selected = _bounded_selection(scored, options.max_pages)
+    selected = _include_related_guardrails(selected, pages, options, max_pages=options.max_pages)
+    selected_paths = {page.relative_path for page in selected}
+    facts: List[str] = []
+    caveats: List[str] = []
+    confirmation_constraints: List[str] = []
+
+    for page in selected:
+        if _page_is_caveat(page):
+            caveats.append(_format_memory_caveat(page))
+        else:
+            facts.append(_format_memory_fact(page))
+        if page.prompt_visibility == "confirm_first":
+            confirmation_constraints.append(
+                "Confirm before relying on {} because its prompt visibility is `confirm_first`.".format(
+                    page.relative_path
+                )
+            )
+        if page.status == "contested" or page.contradictions:
+            confirmation_constraints.append(
+                "Do not resolve contested memory from {} without explicit user confirmation.".format(
+                    page.relative_path
+                )
+            )
+
+    if selected and _task_high_stakes_signal(task.text):
+        confirmation_constraints.append(
+            "The task appears high-stakes or irreversible; ask for confirmation before external side effects or durable commitments."
+        )
+
+    for page in relevant_but_gated:
+        if page.prompt_visibility == "confirm_first":
+            caveats.append(
+                "Relevant memory exists but requires confirmation before use [{}].".format(
+                    page.provenance_label
+                )
+            )
+
+    return UserMemoryPromptContext(
+        task_type=task_type,
+        facts=tuple(_dedupe_strings(facts)),
+        caveats=tuple(_dedupe_strings(caveats)),
+        confirmation_constraints=tuple(_dedupe_strings(confirmation_constraints)),
+        selected_pages=tuple(page for page in selected if page.relative_path in selected_paths),
+        omitted_private_count=omitted_private,
+        omitted_sensitive_count=omitted_sensitive,
+        omitted_irrelevant_count=omitted_irrelevant,
+    )
+
+
+def infer_user_memory_task_type(text: str) -> UserMemoryTaskType:
+    """Infer a coarse task scope from Telegram task text."""
+
+    lower = text.lower()
+    if re.search(r"\b(memory|wiki|remember|retrieve|retrieval|preference|profile)\b", lower):
+        return UserMemoryTaskType.MEMORY_MAINTENANCE
+    if re.search(r"\b(actually|correction|correct|not that|instead)\b", lower):
+        return UserMemoryTaskType.CORRECTION_HANDLING
+    if re.search(r"\b(email|message|meeting|coordinate|intro|follow up|follow-up|negotiate)\b", lower):
+        return UserMemoryTaskType.SOCIAL_COORDINATION
+    if re.search(r"\b(value|values|style|preference|represent|for me|my view)\b", lower):
+        return UserMemoryTaskType.USER_REPRESENTATION
+    if re.search(r"\b(implement|test|code|repo|project|ticket|pr|pull request|debug|run)\b", lower):
+        return UserMemoryTaskType.PROJECT_EXECUTION
+    return UserMemoryTaskType.GENERAL
+
+
+def load_user_memory_pages(root: Path) -> Tuple[UserMemoryPage, ...]:
+    """Load synthesized wiki pages from a user-memory corpus root."""
+
+    root = root.expanduser().resolve()
+    wiki_root = root / "wiki"
+    if not wiki_root.exists() or not wiki_root.is_dir():
+        return ()
+    index_paths = _paths_from_index(root / "index.md", root)
+    discovered = sorted(wiki_root.glob("*/*.md"))
+    by_path: Dict[str, Path] = {}
+    for path in index_paths + tuple(discovered):
+        try:
+            relative = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            continue
+        by_path[relative] = path
+    pages: List[UserMemoryPage] = []
+    for relative in sorted(by_path):
+        page = _load_user_memory_page(by_path[relative], root)
+        if page is not None:
+            pages.append(page)
+    return tuple(pages)
 
 
 def parse_conversation_text(text: str, channel: str = "codex") -> Tuple[ConversationMessage, ...]:
@@ -563,6 +861,425 @@ def parse_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _load_user_memory_page(path: Path, root: Path) -> Optional[UserMemoryPage]:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    frontmatter, body = _split_frontmatter(content)
+    if frontmatter is None:
+        return None
+    metadata = _parse_memory_frontmatter(frontmatter)
+    page_type = _enum_or_none(PageType, metadata.get("page_type"))
+    if page_type is None:
+        return None
+    relative_path = path.resolve().relative_to(root).as_posix()
+    title = metadata.get("title") or _title_from_phrase(path.stem)
+    page_id = metadata.get("id") or "mem-{}".format(slugify(relative_path))
+    confidence_score = _optional_float_text(metadata.get("confidence_score"))
+    summary = _page_prompt_summary(body)
+    return UserMemoryPage(
+        id=page_id,
+        title=title,
+        page_type=page_type,
+        relative_path=relative_path,
+        status=metadata.get("status", "active"),
+        memory_state=metadata.get("memory_state", "unknown"),
+        confidence_level=metadata.get("confidence_level", "unknown"),
+        confidence_score=confidence_score,
+        sensitivity=metadata.get("sensitivity", "private"),
+        prompt_visibility=metadata.get("prompt_visibility", "task_only"),
+        review_status=metadata.get("review_status", "unreviewed"),
+        source_refs=tuple(metadata.get("source_refs", ())),
+        tags=tuple(metadata.get("tags", ())),
+        related=tuple(metadata.get("related", ())),
+        contradictions=tuple(metadata.get("contradictions", ())),
+        corrections=tuple(metadata.get("corrections", ())),
+        summary=summary,
+        body_text=body,
+    )
+
+
+def _split_frontmatter(content: str) -> Tuple[Optional[str], str]:
+    if not content.startswith("---\n"):
+        return None, content
+    end = content.find("\n---", 4)
+    if end == -1:
+        return None, content
+    frontmatter = content[4:end]
+    body = content[end + 4 :].strip()
+    return frontmatter, body
+
+
+def _parse_memory_frontmatter(frontmatter: str) -> Dict[str, object]:
+    metadata: Dict[str, object] = {}
+    current_key: Optional[str] = None
+    current_source_ref: Optional[Dict[str, str]] = None
+    source_refs: List[UserMemorySourceRef] = []
+    list_values: Dict[str, List[str]] = {
+        "related": [],
+        "contradictions": [],
+        "corrections": [],
+        "tags": [],
+    }
+    for raw_line in frontmatter.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        if not line.startswith(" "):
+            current_source_ref = None
+            if ":" not in line:
+                current_key = None
+                continue
+            key, value = line.split(":", 1)
+            current_key = key.strip()
+            value = value.strip()
+            if current_key in list_values:
+                list_values[current_key].extend(_parse_yaml_scalar_list(value))
+            elif current_key == "source_refs":
+                metadata[current_key] = source_refs
+            elif value:
+                metadata[current_key] = _strip_yaml_scalar(value)
+            continue
+        stripped = line.strip()
+        if current_key == "confidence" and ":" in stripped:
+            key, value = stripped.split(":", 1)
+            metadata["confidence_{}".format(key.strip())] = _strip_yaml_scalar(value.strip())
+            continue
+        if current_key == "source_refs":
+            if stripped.startswith("- "):
+                source_ref_data: Dict[str, str] = {}
+                first = stripped[2:].strip()
+                if ":" in first:
+                    key, value = first.split(":", 1)
+                    source_ref_data[key.strip()] = _strip_yaml_scalar(value.strip())
+                current_source_ref = source_ref_data
+                source_refs.append(
+                    UserMemorySourceRef(
+                        source_id=source_ref_data.get("source_id", "unknown-source"),
+                        path=source_ref_data.get("path"),
+                        locator=source_ref_data.get("locator"),
+                        claim=source_ref_data.get("claim"),
+                        support=source_ref_data.get("support"),
+                    )
+                )
+                continue
+            if current_source_ref is not None and ":" in stripped:
+                key, value = stripped.split(":", 1)
+                current_source_ref[key.strip()] = _strip_yaml_scalar(value.strip())
+                source_refs[-1] = UserMemorySourceRef(
+                    source_id=current_source_ref.get("source_id", "unknown-source"),
+                    path=current_source_ref.get("path"),
+                    locator=current_source_ref.get("locator"),
+                    claim=current_source_ref.get("claim"),
+                    support=current_source_ref.get("support"),
+                )
+                continue
+        if current_key in list_values and stripped.startswith("- "):
+            list_values[current_key].append(_strip_yaml_scalar(stripped[2:].strip()))
+    for key, values in list_values.items():
+        metadata[key] = tuple(value for value in values if value)
+    metadata["source_refs"] = tuple(source_refs)
+    return metadata
+
+
+def _paths_from_index(index_path: Path, root: Path) -> Tuple[Path, ...]:
+    if not index_path.exists():
+        return ()
+    try:
+        index_text = index_path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    paths = []
+    for match in re.finditer(r"\[[^\]]+\]\((wiki/[^)]+\.md)\)", index_text):
+        candidate = (root / match.group(1)).resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError:
+            continue
+        paths.append(candidate)
+    return tuple(paths)
+
+
+def _parse_yaml_scalar_list(value: str) -> Tuple[str, ...]:
+    if not value or value == "[]":
+        return ()
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return ()
+        return tuple(_strip_yaml_scalar(part.strip()) for part in inner.split(",") if part.strip())
+    return (_strip_yaml_scalar(value),)
+
+
+def _strip_yaml_scalar(value: str) -> str:
+    text = value.strip()
+    if text in {"null", "~"}:
+        return ""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    return text
+
+
+def _page_prompt_summary(body: str) -> str:
+    lines: List[str] = []
+    in_first_section = False
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if lines:
+                break
+            continue
+        if line.startswith("# "):
+            in_first_section = True
+            continue
+        if line.startswith("## "):
+            break
+        if line.startswith("- "):
+            continue
+        if not in_first_section and line.startswith("#"):
+            continue
+        lines.append(line)
+    if not lines:
+        return _short_claim(_first_claim_summary(body))
+    return _short_claim(" ".join(lines), limit=220)
+
+
+def _enum_or_none(enum_type: Any, value: object) -> Optional[Any]:
+    if not isinstance(value, str):
+        return None
+    try:
+        return enum_type(value)
+    except ValueError:
+        return None
+
+
+def _optional_float_text(value: object) -> Optional[float]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _tokenize_for_retrieval(text: str) -> Set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text.lower())
+        if token not in STOPWORDS
+    }
+
+
+def _memory_relevance_score(
+    page: UserMemoryPage,
+    query_tokens: Set[str],
+    task_type: UserMemoryTaskType,
+) -> float:
+    if not query_tokens:
+        return 0.0
+    title_tokens = _tokenize_for_retrieval(page.title)
+    tag_tokens = _tokenize_for_retrieval(" ".join(page.tags))
+    path_tokens = _tokenize_for_retrieval(page.relative_path.replace("/", " "))
+    body_tokens = _tokenize_for_retrieval("{} {}".format(page.summary, page.body_text))
+    score = (
+        3.0 * len(query_tokens & title_tokens)
+        + 2.0 * len(query_tokens & tag_tokens)
+        + 1.5 * len(query_tokens & path_tokens)
+        + 1.0 * len(query_tokens & body_tokens)
+    )
+    if score == 0:
+        return 0.0
+    score += _task_type_boost(page, task_type)
+    if page.memory_state == MemoryState.CORRECTION.value:
+        score += 1.5
+    if page.prompt_visibility == "confirm_first":
+        score += 0.25
+    return score
+
+
+def _task_type_boost(page: UserMemoryPage, task_type: UserMemoryTaskType) -> float:
+    boosts: Mapping[UserMemoryTaskType, Mapping[PageType, float]] = {
+        UserMemoryTaskType.PROJECT_EXECUTION: {
+            PageType.PROJECT: 1.5,
+            PageType.DECISION: 1.25,
+            PageType.PREFERENCE: 1.0,
+            PageType.VALUE: 0.75,
+            PageType.CONCEPT: 0.5,
+            PageType.CORRECTION: 1.25,
+            PageType.OPEN_QUESTION: 0.5,
+        },
+        UserMemoryTaskType.USER_REPRESENTATION: {
+            PageType.VALUE: 1.5,
+            PageType.PREFERENCE: 1.5,
+            PageType.CORRECTION: 1.25,
+            PageType.OPEN_QUESTION: 1.0,
+            PageType.CONCEPT: 0.75,
+        },
+        UserMemoryTaskType.SOCIAL_COORDINATION: {
+            PageType.PERSON: 1.5,
+            PageType.ORG: 1.5,
+            PageType.PREFERENCE: 1.0,
+            PageType.VALUE: 0.75,
+            PageType.CORRECTION: 1.25,
+            PageType.OPEN_QUESTION: 1.0,
+        },
+        UserMemoryTaskType.CORRECTION_HANDLING: {
+            PageType.CORRECTION: 2.0,
+            PageType.PREFERENCE: 1.0,
+            PageType.VALUE: 1.0,
+            PageType.PROJECT: 0.75,
+            PageType.OPEN_QUESTION: 0.75,
+        },
+        UserMemoryTaskType.MEMORY_MAINTENANCE: {
+            PageType.CONCEPT: 1.5,
+            PageType.PROJECT: 1.25,
+            PageType.DECISION: 1.0,
+            PageType.CORRECTION: 1.25,
+            PageType.OPEN_QUESTION: 1.0,
+            PageType.PREFERENCE: 0.75,
+            PageType.VALUE: 0.75,
+        },
+        UserMemoryTaskType.GENERAL: {
+            PageType.PREFERENCE: 0.5,
+            PageType.VALUE: 0.5,
+            PageType.CORRECTION: 0.5,
+        },
+    }
+    return boosts.get(task_type, {}).get(page.page_type, 0.0)
+
+
+def _page_is_deleted_or_unusable(page: UserMemoryPage) -> bool:
+    return (
+        page.status in {"deleted", "archived"}
+        or page.review_status == "deletion_pending"
+        or page.prompt_visibility == "never"
+    )
+
+
+def _privacy_gate(page: UserMemoryPage, options: UserMemoryRetrievalOptions) -> Optional[str]:
+    if page.sensitivity == "secret":
+        return "sensitive"
+    if page.sensitivity == "restricted" and not options.allow_restricted:
+        return "sensitive"
+    if page.sensitivity == "private" and not options.allow_private:
+        return "private"
+    return None
+
+
+def _bounded_selection(
+    scored: Sequence[Tuple[float, UserMemoryPage]],
+    max_pages: int,
+) -> Tuple[UserMemoryPage, ...]:
+    bounded = max(0, max_pages)
+    if bounded == 0:
+        return ()
+    ranked = sorted(
+        scored,
+        key=lambda item: (
+            -item[0],
+            _memory_state_rank(item[1]),
+            item[1].relative_path,
+        ),
+    )
+    return tuple(page for _, page in ranked[:bounded])
+
+
+def _memory_state_rank(page: UserMemoryPage) -> int:
+    order = {
+        MemoryState.CORRECTION.value: 0,
+        MemoryState.CONFIRMED.value: 1,
+        MemoryState.OBSERVED_PATTERN.value: 2,
+        MemoryState.INFERRED.value: 3,
+        MemoryState.OPEN_QUESTION.value: 4,
+    }
+    return order.get(page.memory_state, 5)
+
+
+def _include_related_guardrails(
+    selected: Sequence[UserMemoryPage],
+    pages: Sequence[UserMemoryPage],
+    options: UserMemoryRetrievalOptions,
+    max_pages: int,
+) -> Tuple[UserMemoryPage, ...]:
+    selected_pages = list(selected)
+    if len(selected_pages) >= max_pages:
+        return tuple(selected_pages[:max_pages])
+    selected_paths = {page.relative_path for page in selected_pages}
+    guardrails = []
+    for page in pages:
+        if page.relative_path in selected_paths:
+            continue
+        if page.page_type not in {PageType.CORRECTION, PageType.OPEN_QUESTION}:
+            continue
+        if _page_is_deleted_or_unusable(page) or _privacy_gate(page, options) is not None:
+            continue
+        related_paths = set(page.related + page.corrections + page.contradictions)
+        if related_paths & selected_paths:
+            guardrails.append(page)
+    for page in sorted(guardrails, key=lambda item: (_memory_state_rank(item), item.relative_path)):
+        if len(selected_pages) >= max_pages:
+            break
+        selected_pages.append(page)
+    return tuple(selected_pages)
+
+
+def _page_is_caveat(page: UserMemoryPage) -> bool:
+    return (
+        page.page_type == PageType.OPEN_QUESTION
+        or page.page_type == PageType.CORRECTION
+        or page.memory_state == MemoryState.OPEN_QUESTION.value
+        or page.memory_state == MemoryState.CORRECTION.value
+        or page.prompt_visibility == "confirm_first"
+        or page.status == "contested"
+        or bool(page.contradictions)
+    )
+
+
+def _format_memory_fact(page: UserMemoryPage) -> str:
+    state_label = page.memory_state.replace("_", " ").capitalize()
+    return "{}: {} - {} [{}]".format(
+        state_label,
+        page.title,
+        page.summary,
+        page.provenance_label,
+    )
+
+
+def _format_memory_caveat(page: UserMemoryPage) -> str:
+    if page.page_type == PageType.OPEN_QUESTION or page.memory_state == MemoryState.OPEN_QUESTION.value:
+        prefix = "Open question"
+    elif page.page_type == PageType.CORRECTION or page.memory_state == MemoryState.CORRECTION.value:
+        prefix = "Correction"
+    elif page.status == "contested" or page.contradictions:
+        prefix = "Contradiction"
+    elif page.prompt_visibility == "confirm_first":
+        prefix = "Needs confirmation"
+    else:
+        prefix = "Caveat"
+    return "{}: {} - {} [{}]".format(
+        prefix,
+        page.title,
+        page.summary,
+        page.provenance_label,
+    )
+
+
+def _task_high_stakes_signal(text: str) -> bool:
+    return bool(HIGH_STAKES_TASK_RE.search(text))
+
+
+def _dedupe_strings(values: Sequence[str]) -> Tuple[str, ...]:
+    seen = set()
+    deduped = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return tuple(deduped)
 
 
 def _extract_from_sentence(

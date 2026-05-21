@@ -29,6 +29,9 @@ from vera_harness.state import JsonRunStateStore
 from vera_harness.telegram import TelegramLongPollingIntake, TelegramUpdateStore
 
 
+MEMORY_FIXTURE = Path(__file__).parent / "fixtures" / "user_memory"
+
+
 class DryRunOrchestrationTests(unittest.TestCase):
     def test_dry_run_builds_workspace_prompt_fake_runtime_and_final_decision(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -105,6 +108,37 @@ class OrchestrationLoopTests(unittest.TestCase):
             state = JsonRunStateStore(Path(temp_dir, "run-state.json")).run_for_task(_task().task_id)
             self.assertEqual(state.status, HarnessRunStatus.COMPLETED)
             self.assertEqual(state.turns_completed, 1)
+
+    def test_prompt_build_includes_user_memory_and_persists_audit_refs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = FakeCodexRuntime()
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_USER_MEMORY_ROOT": str(MEMORY_FIXTURE),
+                },
+            )
+            task = TelegramTask.from_message(
+                chat_id=1,
+                user_id=2,
+                message_id=4,
+                text="Implement Herald user memory retrieval with concise engineering status.",
+            )
+            harness = VeraHarness(config, runtime=runtime)
+
+            result = harness.run_task(task, run_bootstrap=False)
+
+            self.assertEqual(result.harness_run.status, HarnessRunStatus.COMPLETED)
+            self.assertIn("## User Memory Context", result.invocation.prompt)
+            self.assertIn("Direct Engineering Updates", result.invocation.prompt)
+            state = JsonRunStateStore(config.run_state_path).run_for_task(task.task_id)
+            self.assertTrue(
+                any("wiki/preferences/direct-engineering-updates.md" in item for item in state.memory_pages_used)
+            )
+            prompt_event = next(event for event in result.events if event.type == TaskEventType.PROMPT_BUILT)
+            self.assertTrue(
+                any("wiki/preferences/direct-engineering-updates.md" in item for item in prompt_event.payload["user_memory_pages"])
+            )
 
     def test_continue_marker_runs_until_completion_or_max_turns(self):
         with tempfile.TemporaryDirectory() as temp_dir:

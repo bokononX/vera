@@ -104,6 +104,7 @@ def _run_state_to_json(state: RunState) -> Dict[str, Any]:
         "turns_completed": state.turns_completed,
         "dry_run": state.dry_run,
         "workspace_path": state.workspace_path,
+        "memory_pages_used": list(state.memory_pages_used),
         "last_error": state.last_error,
         "last_decision": state.last_decision,
         "created_at": state.created_at.isoformat(),
@@ -122,6 +123,7 @@ def _run_state_from_json(raw: Mapping[str, Any]) -> RunState:
         turns_completed=_optional_int(raw.get("turns_completed")),
         dry_run=bool(raw.get("dry_run", False)),
         workspace_path=_optional_string(raw.get("workspace_path")),
+        memory_pages_used=_optional_string_tuple(raw.get("memory_pages_used")),
         last_error=_optional_string(raw.get("last_error")),
         last_decision=_optional_string(raw.get("last_decision")),
         created_at=_optional_datetime(raw.get("created_at")),
@@ -144,6 +146,16 @@ def _optional_string(value: Any) -> Optional[str]:
 
 def _optional_int(value: Any) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _optional_string_tuple(value: Any) -> Tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    result = []
+    for item in value:
+        if isinstance(item, str) and item:
+            result.append(item)
+    return tuple(result)
 
 
 def _optional_datetime(value: Any) -> datetime:

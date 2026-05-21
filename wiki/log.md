@@ -1,5 +1,9 @@
 # Change log
 
+- 2026-05-21: Updated the Herald user memory concept with prompt retrieval
+  integration: bounded task relevance, privacy gates, provenance/confidence
+  prompt packets, caveats for unresolved memory, confirmation constraints, and
+  run-state audit refs.
 - 2026-05-21: Updated the Herald user memory concept with the implemented
   deterministic conversation/Telegram JSON ingest path, dry-run/apply behavior,
   hash-only source retention default, index/log maintenance, and contradiction

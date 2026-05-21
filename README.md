@@ -246,6 +246,19 @@ The default source-retention policy is `hash_only`: the ingest writes
 conversation text. Use `--memory-source-retention store` only when the source
 policy explicitly allows raw transcript storage.
 
+## User Memory Prompt Retrieval
+
+Set `VERA_USER_MEMORY_ROOT` or `owner.user_memory_root` in the local Telegram
+config to point at one user-memory corpus. When a Telegram task is built for
+Codex, Vera reads that corpus, retrieves a bounded set of task-relevant wiki
+pages, filters private/restricted/secret pages through prompt-visibility gates,
+and adds a compact `User Memory Context` block to the prompt.
+
+The memory block includes page paths, source ids, confidence, sensitivity, and
+caveats for corrections, contradictions, open questions, and `confirm_first`
+memory. It records the memory page ids/paths used in JSON run state so each task
+run can be audited without dumping the full wiki into every prompt.
+
 Assistant identity is handled before owner identity and before Codex in
 persistent chat mode. The active assistant has a first-class profile with a
 name, short self-description, mission, values, communication principles,
@@ -498,7 +511,7 @@ Implemented now:
   turn results;
 - module boundaries for config, Telegram intake, Telegram state persistence,
   workspace management, Codex runtime planning/execution, prompt/policy,
-  user-memory ingest, and orchestration;
+  user-memory ingest/retrieval, and orchestration;
 - Telegram Bot API long polling with injectable transport for tests;
 - authorization by configured chat and/or user ids;
 - duplicate update suppression across restarts through local offset
@@ -532,6 +545,9 @@ Implemented now:
   dry-run review plans, hash-only source retention, page update/create,
   duplicate avoidance, contradiction review notes, index rebuilds, and log
   entries.
+- bounded user-memory retrieval for Codex/Herald prompts with provenance,
+  confidence, privacy filtering, caveats, confirmation constraints, and run-state
+  audit refs.
 
 Not implemented in this ticket:
 

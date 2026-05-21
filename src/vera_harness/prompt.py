@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from .models import AssistantIdentity, OwnerProfile, TelegramTask
+from .user_memory import UserMemoryPromptContext
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class PromptPolicy:
     status_contract: Tuple[str, ...]
     owner_profile: Optional[OwnerProfile]
     owner_profile_facts: Tuple[str, ...] = ()
+    user_memory_context: Optional[UserMemoryPromptContext] = None
 
     @property
     def summary_lines(self) -> Tuple[str, ...]:
@@ -27,6 +29,7 @@ class PromptPolicy:
             self.assistant_identity.summary_lines()
             + self.identity_constraints
             + self.owner_profile_summary_lines
+            + self.user_memory_summary_lines
             + self.cat_131_principles
             + self.operating_limits
             + self.status_contract
@@ -62,6 +65,18 @@ class PromptPolicy:
                 )
             )
         return tuple(lines)
+
+    @property
+    def user_memory_summary_lines(self) -> Tuple[str, ...]:
+        if self.user_memory_context is None or not self.user_memory_context.has_prompt_content:
+            return ()
+        return (
+            "User memory retrieval applied: {} page(s), {} fact(s), {} caveat(s).".format(
+                len(self.user_memory_context.selected_pages),
+                len(self.user_memory_context.facts),
+                len(self.user_memory_context.caveats),
+            ),
+        )
 
     @property
     def owner_profile_lines(self) -> Tuple[str, ...]:
@@ -114,6 +129,12 @@ class PromptPolicy:
                 "",
                 "Task:",
                 self.task.text,
+            ]
+        )
+        if self.user_memory_context is not None and self.user_memory_context.has_prompt_content:
+            sections.extend(["", self.user_memory_context.render_prompt_block()])
+        sections.extend(
+            [
                 "",
                 "Identity constraints:",
             ]
@@ -147,6 +168,7 @@ def build_prompt_policy(
     assistant_identity: Optional[AssistantIdentity] = None,
     owner_profile: Optional[OwnerProfile] = None,
     owner_profile_facts: Tuple[str, ...] = (),
+    user_memory_context: Optional[UserMemoryPromptContext] = None,
 ) -> PromptPolicy:
     session_owner_profile = owner_profile if owner_profile and owner_profile.matches(task) else None
     session_owner_profile_facts = (
@@ -185,6 +207,7 @@ def build_prompt_policy(
         ),
         owner_profile=session_owner_profile,
         owner_profile_facts=session_owner_profile_facts,
+        user_memory_context=user_memory_context,
     )
 
 
