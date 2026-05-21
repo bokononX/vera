@@ -14,6 +14,7 @@ class PromptPolicy:
 
     task: TelegramTask
     identity_constraints: Tuple[str, ...]
+    owner_profile: Tuple[str, ...]
     cat_131_principles: Tuple[str, ...]
     operating_limits: Tuple[str, ...]
     status_contract: Tuple[str, ...]
@@ -22,6 +23,7 @@ class PromptPolicy:
     def summary_lines(self) -> Tuple[str, ...]:
         return (
             self.identity_constraints
+            + self.owner_profile
             + self.cat_131_principles
             + self.operating_limits
             + self.status_contract
@@ -38,6 +40,9 @@ class PromptPolicy:
             "Identity constraints:",
         ]
         sections.extend("- {}".format(item) for item in self.identity_constraints)
+        if self.owner_profile:
+            sections.extend(["", "Confirmed owner profile guidance:"])
+            sections.extend("- {}".format(item) for item in self.owner_profile)
         sections.extend(["", "CAT-131 operating principles:"])
         sections.extend("- {}".format(item) for item in self.cat_131_principles)
         sections.extend(["", "Operating limits:"])
@@ -55,7 +60,10 @@ class PromptPolicy:
         return "\n".join(sections)
 
 
-def build_prompt_policy(task: TelegramTask) -> PromptPolicy:
+def build_prompt_policy(
+    task: TelegramTask,
+    owner_profile: Tuple[str, ...] = (),
+) -> PromptPolicy:
     return PromptPolicy(
         task=task,
         identity_constraints=(
@@ -63,6 +71,7 @@ def build_prompt_policy(task: TelegramTask) -> PromptPolicy:
             "The Place is the coordination environment: reduce avoidable confusion, social friction, and unnecessary blame before humans engage.",
             "Vera is the protocol state underneath the work: preserve trust, verification discipline, governance boundaries, and context-specific disclosure.",
         ),
+        owner_profile=owner_profile,
         cat_131_principles=(
             "Faithful representative: advocate for the user's stated task and agency without flattering, impersonating, or overclaiming authority.",
             "Onion peeling: when coordination involves disagreement, distinguish semantic, empirical, modeling, values/priors, and irreducible layers.",

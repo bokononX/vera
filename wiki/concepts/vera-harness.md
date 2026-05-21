@@ -19,6 +19,12 @@ runtime execution explicit:
   known status, pending prompt, and last assistant response so monitor restarts
   can resume or safely recreate the conversational session without preserving
   raw inbound chat history.
+- **Owner identity/style profile:** intercepts explicit identity interview,
+  inspection, and correction messages in persistent Telegram chat mode before
+  Codex. The interview asks short progressive questions, requires confirmation
+  before durable writes, stores confirmed profile entries separately from raw
+  interview transcript, and injects confirmed guidance into future prompts as
+  revisable practical context rather than personality labeling.
 - **Telegram configuration:** keeps non-secret connectivity settings in a
   local JSON config file while leaving the bot token in an environment-backed
   secret path.
@@ -97,6 +103,14 @@ runtime execution explicit:
   while avoiding raw Telegram message text and unnecessary user context.
 - Persistent chat-session state may record the last assistant response and
   pending prompt, but it should not record raw inbound Telegram message text.
+- Identity/style profile entries should be confirmed before persistence and
+  should carry source, timestamp, confidence, and an explicit correction path.
+- Raw identity interview transcript belongs in a separate interview state file;
+  durable profile entries should contain only the confirmed summary facts used
+  for future prompt guidance.
+- Owner profile guidance should remain calibrated and revisable: it must not be
+  treated as fixed personality truth, and explicit corrections should override
+  older profile entries.
 - Console events should use a small structured schema rather than ad hoc log
   parsing, and should redact secrets plus raw private source-channel bodies by
   default.
