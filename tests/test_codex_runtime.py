@@ -113,6 +113,27 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
             self.assertEqual(result.status, CodexRunStatus.FAILED)
             self.assertIn("failed to launch Codex app-server", result.error)
 
+    def test_default_runtime_reports_missing_executable_without_popen(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = CodexAppServerRuntime(
+                _config(
+                    temp_dir,
+                    {"VERA_CODEX_APP_SERVER_COMMAND": "definitely-missing-codex app-server"},
+                )
+            )
+
+            result = runtime.run_turn(
+                _invocation(
+                    temp_dir,
+                    "Launch.",
+                    {"VERA_CODEX_APP_SERVER_COMMAND": "definitely-missing-codex app-server"},
+                )
+            )
+
+            self.assertEqual(result.status, CodexRunStatus.FAILED)
+            self.assertIn("failed to launch Codex app-server", result.error)
+            self.assertIn("VERA_CODEX_APP_SERVER_COMMAND executable not found on PATH", result.error)
+
     def test_planner_rejects_workspace_outside_configured_root(self):
         with tempfile.TemporaryDirectory() as root_dir, tempfile.TemporaryDirectory() as outside_dir:
             config = _config(root_dir)

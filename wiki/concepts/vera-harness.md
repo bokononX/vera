@@ -26,9 +26,9 @@ runtime execution explicit:
   workspace metadata, and exposes explicit reuse, fresh-create, bootstrap, and
   cleanup behavior.
 - **Codex runtime execution:** launches the configured Codex app-server command
-  inside the task workspace, initializes the JSON-RPC session, starts a thread
-  with configured approval and sandbox policy, and starts task turns with the
-  synthesized prompt.
+  inside the task workspace after readiness resolves the executable path,
+  initializes the JSON-RPC session, starts a thread with configured approval and
+  sandbox policy, and starts task turns with the synthesized prompt.
 - **Runtime event stream:** converts app-server notifications and server
   requests into harness-level events so the orchestrator and Telegram status
   layer can report completion, failure, cancellation, approval-required,
@@ -59,6 +59,9 @@ runtime execution explicit:
   dependencies.
 - Live modes should validate secrets and allow-list settings before accepting
   external tasks.
+- Live modes should validate the configured Codex app-server executable before
+  accepting external tasks, and readiness diagnostics should name the missing
+  command/path without dumping secret-bearing environment details.
 - Telegram bot tokens must not be written to committed config, local templates,
   logs, or config-check output.
 - Non-secret Telegram connectivity settings should prefer the local config file
