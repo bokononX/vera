@@ -27,6 +27,7 @@ class HarnessConfigTests(unittest.TestCase):
                     "VERA_CHAT_SESSION_STATE_PATH": str(Path(temp_dir, "chat-sessions.json")),
                     "VERA_IDENTITY_PROFILE_PATH": str(Path(temp_dir, "identity-profile.json")),
                     "VERA_IDENTITY_INTERVIEW_STATE_PATH": str(Path(temp_dir, "identity-interviews.json")),
+                    "VERA_USER_MEMORY_ROOT": str(Path(temp_dir, "memory", "users", "owner")),
                     "VERA_WORKSPACE_ROOT": temp_dir,
                     "VERA_CODEX_APP_SERVER_COMMAND": "codex app-server --port 0",
                     "VERA_MAX_TURNS": "7",
@@ -66,6 +67,7 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.chat_session_state_path, Path(temp_dir, "chat-sessions.json").resolve())
         self.assertEqual(config.identity_profile_path, Path(temp_dir, "identity-profile.json").resolve())
         self.assertEqual(config.identity_interview_state_path, Path(temp_dir, "identity-interviews.json").resolve())
+        self.assertEqual(config.user_memory_root, Path(temp_dir, "memory", "users", "owner").resolve())
         self.assertEqual(config.workspace_root, Path(temp_dir).resolve())
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server", "--port", "0"))
         self.assertEqual(config.max_turns, 7)
@@ -104,6 +106,7 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.chat_session_state_path.name, "chat_sessions.json")
         self.assertEqual(config.identity_profile_path.name, "identity_profile.json")
         self.assertEqual(config.identity_interview_state_path.name, "identity_interviews.json")
+        self.assertIsNone(config.user_memory_root)
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server"))
         self.assertEqual(config.max_retries, 1)
         self.assertEqual(config.workspace_bootstrap_timeout_seconds, 300)
@@ -188,6 +191,7 @@ class HarnessConfigTests(unittest.TestCase):
                             "communication_style": ["direct and concrete"],
                             "escalation_boundaries": ["require approval before irreversible actions"],
                             "wiki_profile_path": str(profile_path),
+                            "user_memory_root": str(Path(temp_dir, "memory", "users", "owner")),
                         },
                     }
                 ),
@@ -207,6 +211,7 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.owner_profile.communication_style, ("direct and concrete",))
         self.assertEqual(config.owner_profile.wiki_profile_path, profile_path.resolve())
         self.assertIn("prefer correction", config.owner_profile.wiki_profile_excerpt)
+        self.assertEqual(config.user_memory_root, Path(temp_dir, "memory", "users", "owner").resolve())
 
     def test_load_reads_assistant_identity_from_config_and_profile_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

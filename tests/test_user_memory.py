@@ -8,14 +8,18 @@ from vera_harness.user_memory import (
     MemoryState,
     PageType,
     SourceRetention,
+    UserMemoryRetrievalOptions,
     ingest_user_memory,
     load_messages_from_file,
     messages_from_json_payload,
     parse_conversation_text,
+    retrieve_user_memory_for_task,
 )
+from vera_harness.models import TelegramTask
 
 
 CAPTURED_AT = datetime(2026, 5, 21, 0, 0, tzinfo=timezone.utc)
+MEMORY_FIXTURE = Path(__file__).parent / "fixtures" / "user_memory"
 
 
 class UserMemoryExtractionTests(unittest.TestCase):
@@ -218,6 +222,79 @@ class UserMemoryApplyTests(unittest.TestCase):
         self.assertEqual(plan.withheld_secret_count, 1)
         self.assertEqual(len(plan.candidates), 1)
         self.assertNotIn("abc123", plan.format_human_readable())
+
+
+class UserMemoryRetrievalTests(unittest.TestCase):
+    def test_retrieves_bounded_relevant_pages_with_guardrail_caveats(self):
+        task = TelegramTask.from_message(
+            chat_id=100,
+            user_id=200,
+            message_id=300,
+            text="Implement Herald user memory retrieval and give concise engineering status.",
+        )
+
+        context = retrieve_user_memory_for_task(
+            task,
+            UserMemoryRetrievalOptions(
+                root=MEMORY_FIXTURE,
+                max_pages=5,
+                allow_private=True,
+            ),
+        )
+
+        used_paths = {page.relative_path for page in context.selected_pages}
+        self.assertLessEqual(len(context.selected_pages), 5)
+        self.assertIn("wiki/projects/herald-user-memory.md", used_paths)
+        self.assertIn("wiki/preferences/direct-engineering-updates.md", used_paths)
+        self.assertIn("wiki/corrections/status-tone-scope.md", used_paths)
+        self.assertTrue(any("engineering updates" in fact for fact in context.facts))
+        self.assertTrue(any("Status Tone Scope" in caveat for caveat in context.caveats))
+
+    def test_default_privacy_filter_excludes_private_and_restricted_memory(self):
+        task = TelegramTask.from_message(
+            chat_id=100,
+            user_id=200,
+            message_id=301,
+            text="Use concise engineering status and medical memory.",
+        )
+
+        context = retrieve_user_memory_for_task(
+            task,
+            UserMemoryRetrievalOptions(root=MEMORY_FIXTURE, max_pages=5),
+        )
+        block = context.render_prompt_block()
+
+        self.assertNotIn("Direct Engineering Updates", block)
+        self.assertNotIn("Private Medical Detail", block)
+        self.assertNotIn("Secret Token Handling", block)
+        self.assertGreaterEqual(context.omitted_private_count, 1)
+        self.assertGreaterEqual(context.omitted_sensitive_count, 1)
+
+    def test_prompt_block_marks_provenance_confidence_and_open_questions(self):
+        task = TelegramTask.from_message(
+            chat_id=100,
+            user_id=200,
+            message_id=302,
+            text="Plan Herald memory review cadence for prompt retrieval.",
+        )
+
+        context = retrieve_user_memory_for_task(
+            task,
+            UserMemoryRetrievalOptions(
+                root=MEMORY_FIXTURE,
+                max_pages=5,
+                allow_private=True,
+            ),
+        )
+        block = context.render_prompt_block()
+
+        self.assertIn("## User Memory Context", block)
+        self.assertIn("page: wiki/questions/memory-review-cadence.md", block)
+        self.assertIn("source: src-question-review-cadence", block)
+        self.assertIn("confidence: low", block)
+        self.assertIn("Open question:", block)
+        self.assertIn("Confirmation constraints:", block)
+        self.assertIn("confirm_first", block)
 
 
 def _options(root: Path, channel: str = "codex") -> IngestOptions:

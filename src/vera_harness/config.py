@@ -96,6 +96,7 @@ class HarnessConfig:
     chat_session_state_path: Path
     identity_profile_path: Path
     identity_interview_state_path: Path
+    user_memory_root: Optional[Path]
     event_log_path: Path
     budget_snapshot_path: Optional[Path]
     monthly_budget_usd: Optional[float]
@@ -240,6 +241,14 @@ class HarnessConfig:
         identity_interview_state_path = Path(
             source.get("VERA_IDENTITY_INTERVIEW_STATE_PATH", "./.vera/identity_interviews.json")
         ).expanduser().resolve()
+        user_memory_root = _parse_optional_path(
+            _setting_value(
+                owner_config or {},
+                "user_memory_root",
+                source.get("VERA_USER_MEMORY_ROOT"),
+            ),
+            "owner.user_memory_root",
+        )
         event_log_path = Path(
             source.get("VERA_EVENT_LOG_PATH", "./.vera/events.jsonl")
         ).expanduser().resolve()
@@ -337,6 +346,7 @@ class HarnessConfig:
             chat_session_state_path=chat_session_state_path,
             identity_profile_path=identity_profile_path,
             identity_interview_state_path=identity_interview_state_path,
+            user_memory_root=user_memory_root,
             event_log_path=event_log_path,
             budget_snapshot_path=budget_snapshot_path,
             monthly_budget_usd=monthly_budget_usd,
@@ -535,6 +545,7 @@ def _owner_config_from_local(local_config: Mapping[str, Any]) -> Optional[Mappin
         "communication_style",
         "escalation_boundaries",
         "wiki_profile_path",
+        "user_memory_root",
     }
     unknown = sorted(set(owner_config.keys()) - allowed)
     if unknown:

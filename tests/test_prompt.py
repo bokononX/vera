@@ -1,7 +1,12 @@
 import unittest
+from pathlib import Path
 
 from vera_harness.models import AssistantIdentity, OwnerProfile, TelegramTask
 from vera_harness.prompt import build_prompt_policy
+from vera_harness.user_memory import UserMemoryRetrievalOptions, retrieve_user_memory_for_task
+
+
+MEMORY_FIXTURE = Path(__file__).parent / "fixtures" / "user_memory"
 
 
 class PromptPolicyTests(unittest.TestCase):
@@ -108,6 +113,33 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertNotIn("concise correction", "\n".join(owner_policy.summary_lines))
         self.assertNotIn("Owner relationship:", other_prompt)
         self.assertNotIn("direct and concrete", other_prompt)
+
+    def test_user_memory_context_renders_with_provenance_and_caveats(self):
+        task = TelegramTask.from_message(
+            chat_id=100,
+            user_id=200,
+            message_id=300,
+            text="Implement Herald user memory retrieval with concise engineering status.",
+        )
+        memory_context = retrieve_user_memory_for_task(
+            task,
+            UserMemoryRetrievalOptions(
+                root=MEMORY_FIXTURE,
+                max_pages=5,
+                allow_private=True,
+            ),
+        )
+
+        policy = build_prompt_policy(task, user_memory_context=memory_context)
+        prompt = policy.render_prompt()
+
+        self.assertLess(prompt.index("## User Memory Context"), prompt.index("Identity constraints:"))
+        self.assertIn("Direct Engineering Updates", prompt)
+        self.assertIn("source: src-pref-direct-updates", prompt)
+        self.assertIn("confidence: high", prompt)
+        self.assertIn("Correction: Status Tone Scope", prompt)
+        self.assertIn("User corrected that concise status preferences", prompt)
+        self.assertIn("User memory retrieval applied", "\n".join(policy.summary_lines))
 
 
 if __name__ == "__main__":

@@ -47,6 +47,25 @@ The default source-retention policy is `hash_only`: raw conversation text is
 not persisted, while source ids, hashes, locators, confidence, and claim
 summaries remain available for provenance and review.
 
+## Implemented Prompt Retrieval Boundary
+
+The harness can now use a configured user-memory corpus during Telegram-to-Codex
+task prompting. `VERA_USER_MEMORY_ROOT` or `owner.user_memory_root` names the
+corpus for the owner. Prompt construction reads the index and synthesized wiki
+pages, ranks pages against the Telegram task text and inferred task scope, and
+selects only a bounded set of relevant pages.
+
+Retrieval keeps prompt packets compact and provenance-bearing. Prompt facts and
+caveats include page paths, source ids, confidence, and sensitivity markers.
+Corrections, open questions, contested pages, and `confirm_first` pages are
+rendered as caveats or confirmation constraints rather than ordinary facts.
+Restricted and secret memory are excluded by default; private memory is only
+used for the configured owner path and must still be task-relevant.
+
+Each task run records the selected memory page ids/paths in JSON run state, so
+debugging can inspect what memory influenced the prompt without reconstructing
+the full wiki disclosure.
+
 ## Source
 
 - [Herald user memory wiki schema](../../docs/herald-user-memory-wiki-schema.md)
