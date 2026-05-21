@@ -223,6 +223,23 @@ Telegram chat/user mapping, workspace path, Codex thread id, last turn id, last
 known status, pending prompt, and last assistant response needed for local
 restart/recovery. It does not store raw inbound Telegram message text.
 
+Identity/style onboarding is handled before Codex in persistent chat mode.
+The owner can send `/identity`, `/interview`, or a natural-language
+identity/style interview request from Telegram. Vera asks short progressive
+questions, summarizes proposed durable profile entries, and writes them only
+after explicit confirmation. Confirmed profile entries are stored at
+`VERA_IDENTITY_PROFILE_PATH` (`./.vera/identity_profile.json` by default) with
+source, timestamp, confidence, and a correction path. Raw interview transcript
+and active interview state are kept separately at
+`VERA_IDENTITY_INTERVIEW_STATE_PATH`
+(`./.vera/identity_interviews.json` by default).
+
+The owner can inspect stored facts with `/identity profile` and refine them
+with messages such as `that's wrong`, `forget that`, or
+`change my style preference to concise and direct`. Confirmed identity/style
+guidance is included in future Codex prompts as revisable guidance, not as a
+fixed personality label or a reason to flatter the owner.
+
 ## Configuration
 
 Telegram non-secret connectivity settings are read from a JSON config file.
@@ -277,6 +294,8 @@ Other harness and Codex settings remain environment-backed:
 | `VERA_TELEGRAM_CONFIG_PATH` | No | Optional path to Telegram non-secret JSON config. Equivalent to `--telegram-config`. |
 | `VERA_RUN_STATE_PATH` | No | Local JSON file for minimal orchestration run state. Defaults to `./.vera/run_state.json`. |
 | `VERA_CHAT_SESSION_STATE_PATH` | No | Local JSON file for persistent Telegram chat sessions and Codex thread ids. Defaults to `./.vera/chat_sessions.json`. |
+| `VERA_IDENTITY_PROFILE_PATH` | No | Local JSON file for confirmed owner identity/style profile entries. Defaults to `./.vera/identity_profile.json`. |
+| `VERA_IDENTITY_INTERVIEW_STATE_PATH` | No | Local JSON file for identity interview state and raw interview transcript. Defaults to `./.vera/identity_interviews.json`. |
 | `VERA_EVENT_LOG_PATH` | No | Local JSONL file for structured console events. Defaults to `./.vera/events.jsonl`. |
 | `VERA_BUDGET_SNAPSHOT_PATH` | No | Optional local JSON file with rate-limit and usage snapshots for the console budget bar. |
 | `VERA_MONTHLY_BUDGET_USD` | No | Optional monthly budget threshold shown in the console. |

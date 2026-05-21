@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -420,6 +421,162 @@ class TelegramChatSessionTests(unittest.TestCase):
             self.assertIn("missing codex", api.sent_messages[0]["text"])
             self.assertEqual(result.chat_turns[0].session.last_status, HarnessRunStatus.FAILED.value)
 
+    def test_identity_interview_from_telegram_confirms_profile_and_updates_future_prompt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                },
+            )
+            texts = (
+                "/identity",
+                "Victor; avoid formal titles.",
+                "Optimize for correct, useful progress.",
+                "Brief, direct, and enough detail to verify.",
+                "Challenge weak assumptions early.",
+                "Prefer truth, agency, reversibility, and low drama.",
+                "Be careful with personal data and irreversible choices.",
+                "Remember stable preferences; do not persist throwaway moods.",
+                "confirm",
+                "Use my profile on this task.",
+            )
+            api = FakeTelegramApi(_message_updates(90, texts))
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+                send_accepted_reply=False,
+            )
+            runtime = ScriptedChatRuntime(("Profile-aware Codex response.",))
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: runtime)
+
+            result = harness.run_telegram_chat_poll_once(
+                polling_intake=intake,
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(runtime.calls, 1)
+            self.assertEqual(len(result.chat_turns), 1)
+            self.assertIn("Identity interview 1/7", api.sent_messages[0]["text"])
+            self.assertIn("Here is what I would save", api.sent_messages[7]["text"])
+            self.assertIn("Saved 7 confirmed identity/style facts", api.sent_messages[8]["text"])
+            self.assertEqual(api.sent_messages[9]["text"], "Profile-aware Codex response.")
+            self.assertIn("Confirmed owner profile guidance", runtime.prompts[0])
+            self.assertIn("Victor; avoid formal titles.", runtime.prompts[0])
+            self.assertIn("Brief, direct, and enough detail to verify.", runtime.prompts[0])
+
+            profile = json.loads(Path(config.identity_profile_path).read_text(encoding="utf-8"))
+            self.assertEqual(len(profile["entries"]), 7)
+            first_entry = profile["entries"][0]
+            self.assertEqual(first_entry["category"], "address_name")
+            self.assertEqual(first_entry["source"], "telegram_identity_interview")
+            self.assertIn("confidence", first_entry)
+            self.assertIn("correction_path", first_entry)
+            self.assertIn(308, first_entry["source_message_ids"])
+
+            interview_state = json.loads(
+                Path(config.identity_interview_state_path).read_text(encoding="utf-8")
+            )
+            session = interview_state["sessions"]["telegram-chat-100-user-200"]
+            self.assertEqual(session["status"], "completed")
+            self.assertGreater(len(session["transcript"]), len(profile["entries"]))
+
+    def test_identity_interview_can_cancel_without_profile_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                },
+            )
+            api = FakeTelegramApi(_message_updates(120, ("/interview", "cancel", "normal task")))
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+                send_accepted_reply=False,
+            )
+            runtime = ScriptedChatRuntime(("Normal response.",))
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: runtime)
+
+            result = harness.run_telegram_chat_poll_once(
+                polling_intake=intake,
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(runtime.calls, 1)
+            self.assertEqual(len(result.chat_turns), 1)
+            self.assertIn("Identity interview cancelled", api.sent_messages[1]["text"])
+            self.assertFalse(Path(config.identity_profile_path).exists())
+            self.assertNotIn("Confirmed owner profile guidance", runtime.prompts[0])
+
+    def test_identity_profile_inspection_correction_and_forget(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                },
+            )
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: ScriptedChatRuntime(()))
+            first_api = FakeTelegramApi(
+                _message_updates(
+                    150,
+                    (
+                        "/identity",
+                        "Victor.",
+                        "Useful and correct.",
+                        "Detailed when risk is high.",
+                        "Disagree plainly.",
+                        "Truth and agency.",
+                        "Privacy.",
+                        "Remember durable preferences only.",
+                        "confirm",
+                    ),
+                )
+            )
+            first_intake = TelegramLongPollingIntake(
+                config,
+                api=first_api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+                send_accepted_reply=False,
+            )
+            harness.run_telegram_chat_poll_once(polling_intake=first_intake, run_bootstrap=False)
+
+            second_api = FakeTelegramApi(
+                _message_updates(
+                    170,
+                    (
+                        "/identity profile",
+                        "change my style preference to concise and direct",
+                        "/identity profile",
+                        "forget that",
+                    ),
+                )
+            )
+            second_intake = TelegramLongPollingIntake(
+                config,
+                api=second_api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+                send_accepted_reply=False,
+            )
+
+            harness.run_telegram_chat_poll_once(polling_intake=second_intake, run_bootstrap=False)
+
+            self.assertIn("Tone and detail: Detailed when risk is high.", second_api.sent_messages[0]["text"])
+            self.assertIn("Updated Tone and detail: concise and direct", second_api.sent_messages[1]["text"])
+            self.assertIn("Tone and detail: concise and direct", second_api.sent_messages[2]["text"])
+            self.assertIn("Forgot Tone and detail: concise and direct.", second_api.sent_messages[3]["text"])
+
+            profile = json.loads(Path(config.identity_profile_path).read_text(encoding="utf-8"))
+            tone_entries = [entry for entry in profile["entries"] if entry["category"] == "tone_detail"]
+            self.assertEqual([entry["status"] for entry in tone_entries], ["archived", "archived"])
+            self.assertEqual(tone_entries[1]["source"], "telegram_identity_correction")
+
 
 class ScriptedRuntime:
     def __init__(self, results):
@@ -496,6 +653,8 @@ def _config(temp_dir, extra_env=None):
         "VERA_WORKSPACE_ROOT": temp_dir,
         "VERA_RUN_STATE_PATH": str(Path(temp_dir, "run-state.json")),
         "VERA_CHAT_SESSION_STATE_PATH": str(Path(temp_dir, "chat-sessions.json")),
+        "VERA_IDENTITY_PROFILE_PATH": str(Path(temp_dir, "identity-profile.json")),
+        "VERA_IDENTITY_INTERVIEW_STATE_PATH": str(Path(temp_dir, "identity-interviews.json")),
         "VERA_TELEGRAM_STATE_PATH": str(Path(temp_dir, "telegram-state.json")),
         "VERA_CODEX_APP_SERVER_COMMAND": "fake-codex app-server",
     }
@@ -541,6 +700,19 @@ def _message_update(update_id, chat_id=100, user_id=200, message_id=300, text="D
             "text": text,
         },
     }
+
+
+def _message_updates(first_update_id, texts, chat_id=100, user_id=200, first_message_id=300):
+    return tuple(
+        _message_update(
+            update_id=first_update_id + index,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=first_message_id + index,
+            text=text,
+        )
+        for index, text in enumerate(texts)
+    )
 
 
 def _runtime_result(status, marker, error=None):

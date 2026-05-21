@@ -54,6 +54,8 @@ class CliConfigTests(unittest.TestCase):
         self.assertIn("telegram_bot_token: <secret-present>", rendered)
         self.assertIn("allowed_chat_ids: 100", rendered)
         self.assertIn("telegram_poll_timeout_seconds: 9", rendered)
+        self.assertIn("identity_profile_path:", rendered)
+        self.assertIn("identity_interview_state_path:", rendered)
         self.assertIn(
             "codex_app_server_executable: {}".format(Path(sys.executable).resolve()),
             rendered,

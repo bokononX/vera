@@ -22,6 +22,12 @@ from .codex import (
     CodexSessionMetadata,
 )
 from .config import HarnessConfig
+from .identity import (
+    IdentityInterviewController,
+    JsonIdentityInterviewStore,
+    JsonIdentityProfileStore,
+    render_chat_prompt_with_profile,
+)
 from .models import (
     HarnessRun,
     HarnessRunStatus,
@@ -215,6 +221,7 @@ class VeraHarness:
         run_store: Optional[RunStateStore] = None,
         chat_store: Optional[ChatSessionStore] = None,
         chat_runtime_factory: Optional[ChatRuntimeFactory] = None,
+        identity_controller: Optional[IdentityInterviewController] = None,
         on_event: Optional[TaskEventCallback] = None,
     ) -> None:
         self._config = config
@@ -228,6 +235,10 @@ class VeraHarness:
             lambda resume_thread_id: CodexAppServerSession(config, resume_thread_id=resume_thread_id)
         )
         self._chat_runtimes: Dict[str, CodexChatRuntime] = {}
+        self._identity = identity_controller or IdentityInterviewController(
+            profile_store=JsonIdentityProfileStore(config.identity_profile_path),
+            interview_store=JsonIdentityInterviewStore(config.identity_interview_state_path),
+        )
         self._on_event = on_event
 
     def dry_run_task(
@@ -382,7 +393,7 @@ class VeraHarness:
             },
         )
 
-        policy = build_prompt_policy(task)
+        policy = build_prompt_policy(task, owner_profile=self._identity.profile_prompt_lines())
         prompt = policy.render_prompt()
         invocation = self._planner.plan(workspace, prompt)
         self._emit(
@@ -617,6 +628,21 @@ class VeraHarness:
 
         for task in intake.queue.drain():
             update_id = task_update_ids.get(task.task_id)
+            identity_response = self._identity.handle(task)
+            if identity_response is not None:
+                intake.send_chat_response(task, identity_response)
+                responses.append(
+                    TelegramChatResponseDelivery(
+                        update_id=update_id,
+                        session_id="identity:{}".format(task.task_id),
+                        task_id=task.task_id,
+                        chat_id=task.chat_id,
+                        message_id=task.message_id,
+                        text=identity_response,
+                        status=TelegramTaskStatus.COMPLETED,
+                    )
+                )
+                continue
             session, run_result = self.run_chat_turn(
                 task,
                 create_workspace=create_workspace,
@@ -700,9 +726,10 @@ class VeraHarness:
             runtime = self._chat_runtime_factory(session.thread_id)
             self._chat_runtimes[session.session_id] = runtime
 
-        prompt = task.text
+        owner_profile = self._identity.profile_prompt_lines()
+        prompt = render_chat_prompt_with_profile(task.text, owner_profile)
         if session.turns_completed == 0 and session.thread_id is None and runtime.pending_request is None:
-            prompt = build_prompt_policy(task).render_prompt()
+            prompt = build_prompt_policy(task, owner_profile=owner_profile).render_prompt()
             self._emit_session_event(
                 events,
                 TaskEventType.PROMPT_BUILT,
