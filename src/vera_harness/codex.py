@@ -1266,7 +1266,13 @@ def _auto_input_response(params: Mapping[str, Any], response_text: str) -> Dict[
 def extract_assistant_response(events: Sequence[CodexRuntimeEvent]) -> Optional[str]:
     """Return the last user-facing assistant text found in app-server events."""
 
-    for event in reversed(tuple(events)):
+    event_list = tuple(events)
+    for event in reversed(event_list):
+        text = _completed_agent_message_text(event)
+        if text:
+            return text
+
+    for event in reversed(event_list):
         text = _assistant_text_from_value(event.payload)
         if text:
             return text
@@ -1274,7 +1280,77 @@ def extract_assistant_response(events: Sequence[CodexRuntimeEvent]) -> Optional[
             text = _clean_assistant_text(event.message)
             if text and "VERA_TASK_STATUS:" not in text:
                 return text
+    return _assistant_text_from_agent_message_deltas(event_list)
+
+
+def _completed_agent_message_text(event: CodexRuntimeEvent) -> Optional[str]:
+    method = _event_method(event)
+    if method not in {"item/completed", "turn/completed"}:
+        return None
+
+    params = _event_params(event)
+    if method == "item/completed":
+        return _agent_message_item_text(_mapping(params.get("item")))
+
+    turn = _mapping(params.get("turn"))
+    items = turn.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in reversed(items):
+        text = _agent_message_item_text(_mapping(item))
+        if text:
+            return text
     return None
+
+
+def _assistant_text_from_agent_message_deltas(events: Sequence[CodexRuntimeEvent]) -> Optional[str]:
+    chunks_by_item: Dict[Tuple[str, str], List[str]] = {}
+    latest_key: Optional[Tuple[str, str]] = None
+    for event in events:
+        if _event_method(event) != "item/agentMessage/delta":
+            continue
+        params = _event_params(event)
+        delta = params.get("delta")
+        if isinstance(delta, str):
+            if delta == "":
+                continue
+            text = delta
+        else:
+            text = _assistant_text_from_value(delta, assistant_context=True)
+            if not text:
+                continue
+        key = (
+            _optional_string(params.get("turnId")) or event.turn_id or "",
+            _optional_string(params.get("itemId")) or "",
+        )
+        chunks_by_item.setdefault(key, []).append(text)
+        latest_key = key
+    if latest_key is None:
+        return None
+    return _clean_assistant_text("".join(chunks_by_item[latest_key]))
+
+
+def _agent_message_item_text(item: Mapping[str, Any]) -> Optional[str]:
+    if item.get("type") != "agentMessage":
+        return None
+    text = item.get("text")
+    if isinstance(text, str):
+        return _clean_assistant_text(text)
+    return _assistant_text_from_value(item, assistant_context=True)
+
+
+def _event_method(event: CodexRuntimeEvent) -> Optional[str]:
+    if event.method:
+        return event.method
+    return _optional_string(_mapping(event.payload).get("method"))
+
+
+def _event_params(event: CodexRuntimeEvent) -> Mapping[str, Any]:
+    payload = _mapping(event.payload)
+    params = payload.get("params")
+    if isinstance(params, Mapping):
+        return params
+    return payload
 
 
 def _assistant_text_from_value(value: Any, assistant_context: bool = False) -> Optional[str]:
@@ -1297,6 +1373,7 @@ def _assistant_text_from_value(value: Any, assistant_context: bool = False) -> O
         "assistant",
         "assistant_message",
         "assistantMessage",
+        "agentMessage",
         "message/assistant",
     }
     if value_type in {"output_text", "assistant_text"} or (
@@ -1316,7 +1393,7 @@ def _assistant_text_from_value(value: Any, assistant_context: bool = False) -> O
         if joined:
             return joined
 
-    for key in ("item", "message", "delta", "content", "items", "turn", "output"):
+    for key in ("params", "item", "message", "delta", "content", "items", "turn", "output"):
         text = _assistant_text_from_value(value.get(key), assistant_context=is_assistant)
         if text:
             return text

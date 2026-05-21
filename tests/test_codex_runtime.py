@@ -202,6 +202,23 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
             self.assertEqual(sent[3]["params"]["threadId"], "thread-1")
             self.assertEqual(sent[3]["params"]["input"], [{"type": "text", "text": "follow up"}])
 
+    def test_persistent_session_extracts_real_agent_message_protocol_items(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            factory = ProcessFactory(_persistent_agent_message_messages(workspace))
+            session = CodexAppServerSession(_config(temp_dir), process_factory=factory)
+
+            first = session.run_turn(_invocation(temp_dir, "hello"))
+            second = session.run_turn(_invocation(temp_dir, "follow up"))
+            session.close()
+
+            self.assertEqual(first.status, CodexRunStatus.COMPLETED)
+            self.assertEqual(first.assistant_response, "Hello from Codex.")
+            self.assertEqual(second.status, CodexRunStatus.COMPLETED)
+            self.assertEqual(second.assistant_response, "Still the same thread.")
+            self.assertEqual(first.metadata.thread_id, "thread-1")
+            self.assertEqual(second.metadata.thread_id, "thread-1")
+
     def test_persistent_session_launch_failure_returns_failed_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             def failing_factory(command, cwd):
@@ -266,6 +283,92 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(extract_assistant_response((event,)), "Natural response.")
+
+    def test_extract_assistant_response_handles_item_completed_agent_message(self):
+        event = _notification_event(
+            "item/completed",
+            {
+                "completedAtMs": 1760000000000,
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-1",
+                    "type": "agentMessage",
+                    "text": "Natural response.",
+                },
+            },
+        )
+
+        self.assertEqual(extract_assistant_response((event,)), "Natural response.")
+
+    def test_extract_assistant_response_handles_turn_completed_agent_message(self):
+        event = _event_from_payload(
+            {
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "status": "completed",
+                    "items": [
+                        {"id": "item-user", "type": "userMessage", "text": "hello"},
+                        {
+                            "id": "item-1",
+                            "type": "agentMessage",
+                            "text": "Natural response.",
+                        },
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(extract_assistant_response((event,)), "Natural response.")
+
+    def test_extract_assistant_response_accumulates_agent_message_deltas_as_fallback(self):
+        events = (
+            _notification_event(
+                "item/agentMessage/delta",
+                {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "delta": "Draft"},
+            ),
+            _notification_event(
+                "item/agentMessage/delta",
+                {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-2", "delta": "Natural "},
+            ),
+            _notification_event(
+                "item/agentMessage/delta",
+                {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-2", "delta": "response."},
+            ),
+            CodexRuntimeEvent(
+                type=CodexRuntimeEventType.TURN_COMPLETED,
+                method="turn/completed",
+                payload={"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed", "items": []}},
+                thread_id="thread-1",
+                turn_id="turn-1",
+            ),
+        )
+
+        self.assertEqual(extract_assistant_response(events), "Natural response.")
+
+    def test_extract_assistant_response_prefers_completed_agent_message_over_deltas(self):
+        events = (
+            _notification_event(
+                "item/agentMessage/delta",
+                {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "delta": "Draft response."},
+            ),
+            _notification_event(
+                "item/completed",
+                {
+                    "completedAtMs": 1760000000000,
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "id": "item-1",
+                        "type": "agentMessage",
+                        "text": "Final response.",
+                    },
+                },
+            ),
+        )
+
+        self.assertEqual(extract_assistant_response(events), "Final response.")
 
     def test_run_turn_maps_failed_turn_to_failed_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -507,6 +610,90 @@ def _persistent_success_messages(workspace):
     ]
 
 
+def _persistent_agent_message_messages(workspace):
+    return _base_messages(workspace) + [
+        {
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "delta": "Hello from ",
+            },
+        },
+        {
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "delta": "Codex.",
+            },
+        },
+        {
+            "method": "item/completed",
+            "params": {
+                "completedAtMs": 1760000000000,
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-1",
+                    "type": "agentMessage",
+                    "text": "Hello from Codex.",
+                },
+            },
+        },
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "status": "completed",
+                    "items": [
+                        {
+                            "id": "item-1",
+                            "type": "agentMessage",
+                            "text": "Hello from Codex.",
+                        }
+                    ],
+                },
+            },
+        },
+        {"id": 4, "result": {"turn": {"id": "turn-2", "status": "inProgress", "items": []}}},
+        {
+            "method": "item/completed",
+            "params": {
+                "completedAtMs": 1760000001000,
+                "threadId": "thread-1",
+                "turnId": "turn-2",
+                "item": {
+                    "id": "item-2",
+                    "type": "agentMessage",
+                    "text": "Still the same thread.",
+                },
+            },
+        },
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-2",
+                    "status": "completed",
+                    "items": [
+                        {
+                            "id": "item-2",
+                            "type": "agentMessage",
+                            "text": "Still the same thread.",
+                        }
+                    ],
+                },
+            },
+        },
+    ]
+
+
 def _base_messages(workspace):
     return [
         {
@@ -540,6 +727,16 @@ def _event_from_payload(payload):
         type=CodexRuntimeEventType.TURN_COMPLETED,
         method="turn/completed",
         payload=payload,
+    )
+
+
+def _notification_event(method, params):
+    return CodexRuntimeEvent(
+        type=CodexRuntimeEventType.NOTIFICATION,
+        method=method,
+        payload={"jsonrpc": "2.0", "method": method, "params": params},
+        thread_id=params.get("threadId"),
+        turn_id=params.get("turnId"),
     )
 
 

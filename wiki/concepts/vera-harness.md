@@ -38,7 +38,9 @@ runtime execution explicit:
 - **Runtime event stream:** converts app-server notifications and server
   requests into harness-level events so the orchestrator and Telegram status
   layer can report completion, failure, cancellation, approval-required,
-  input-required, and timeout outcomes.
+  input-required, and timeout outcomes. User-facing Codex replies come from
+  completed `agentMessage` thread items when available, with streamed
+  `item/agentMessage/delta` text used only as a fallback.
 - **Orchestration:** accepts normalized Telegram or dry-run tasks, creates or
   reuses isolated workspaces, builds policy prompts, runs Codex up to the
   configured turn and retry budgets, maps each turn to continue/complete/retry/
