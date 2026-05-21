@@ -1,0 +1,11 @@
+User: I value reversible decisions.
+User: I prefer concise engineering updates.
+User: Project: Herald user memory pipeline.
+User: Decision: keep raw conversation retention hash-only by default.
+User: Person: Alice Example - collaborator on memory review.
+User: Organization: Example Labs - project partner.
+User: Concept: Minimal footprint means do not hoard raw chat text.
+User: I might prefer a monthly memory review cadence.
+User: I usually ask for validation evidence.
+User: Open question: what stale memory review cadence should Vera use?
+Assistant: Great, I will remember everything.

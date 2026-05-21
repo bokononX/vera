@@ -224,6 +224,28 @@ Telegram chat/user mapping, workspace path, Codex thread id, last turn id, last
 known status, pending prompt, and last assistant response needed for local
 restart/recovery. It does not store raw inbound Telegram message text.
 
+## User Memory Ingest
+
+The harness can turn a transcript or normalized Telegram JSON file into
+reviewable Herald user-memory wiki proposals:
+
+```sh
+PYTHONPATH=src python3 -m vera_harness --ingest-user-memory \
+  --conversation-file tests/fixtures/sample_conversation.txt \
+  --memory-root ./.vera/sample-memory \
+  --memory-user-id user-example \
+  --captured-at 2026-05-21T00:00:00Z
+```
+
+Dry-run mode is the default. It prints the proposed page creates/updates,
+classification, confidence, review queue changes, index rebuild, and log entry
+without mutating files. Add `--apply-memory-ingest` to write the corpus.
+
+The default source-retention policy is `hash_only`: the ingest writes
+`raw/manifest.jsonl` plus non-raw redaction metadata and does not persist raw
+conversation text. Use `--memory-source-retention store` only when the source
+policy explicitly allows raw transcript storage.
+
 Assistant identity is handled before owner identity and before Codex in
 persistent chat mode. The active assistant has a first-class profile with a
 name, short self-description, mission, values, communication principles,
@@ -475,8 +497,8 @@ Implemented now:
   policy, bootstrap diagnostics, persistent run state, task events, and Codex
   turn results;
 - module boundaries for config, Telegram intake, Telegram state persistence,
-  workspace management, Codex runtime planning/execution, prompt/policy, and
-  orchestration;
+  workspace management, Codex runtime planning/execution, prompt/policy,
+  user-memory ingest, and orchestration;
 - Telegram Bot API long polling with injectable transport for tests;
 - authorization by configured chat and/or user ids;
 - duplicate update suppression across restarts through local offset
@@ -506,6 +528,10 @@ Implemented now:
   Codex app-server environments.
 - shared console observability projection, structured JSONL event log, terminal
   console, local web console, redaction safeguards, and budget fallback states.
+- deterministic conversation/Telegram JSON to user-memory wiki ingest with
+  dry-run review plans, hash-only source retention, page update/create,
+  duplicate avoidance, contradiction review notes, index rebuilds, and log
+  entries.
 
 Not implemented in this ticket:
 
