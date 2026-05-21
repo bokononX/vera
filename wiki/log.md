@@ -1,5 +1,7 @@
 # Change log
 
+- 2026-05-21: Added the Herald user memory concept and linked the detailed
+  user-memory wiki schema design.
 - 2026-05-20: Added the Herald, The Place, and Vera concept page and linked the
   canonical project concept document.
 - 2026-05-20: Added the Vera harness concept page for the initial
