@@ -19,6 +19,7 @@ from urllib import request as urllib_request
 
 from .config import ConfigError, HarnessConfig
 from .models import TelegramTask
+from .observability import redact_text
 
 
 TelegramJsonRequester = Callable[[str, Mapping[str, object], int], Mapping[str, object]]
@@ -473,7 +474,7 @@ def _extract_message(update: Mapping[str, Any]) -> Optional[Tuple[int, int, int,
 def _status_detail(reason: Optional[str]) -> str:
     if reason is None:
         return ""
-    return " ".join(reason.split())[:280]
+    return " ".join(redact_text(reason).split())[:280]
 
 
 def _empty_state() -> dict[str, Any]:

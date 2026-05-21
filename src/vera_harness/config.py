@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
@@ -12,6 +13,10 @@ from typing import Any, Mapping, Optional, Tuple
 
 class ConfigError(ValueError):
     """Raised when harness configuration is invalid."""
+
+
+class CommandResolutionError(ConfigError):
+    """Raised when a configured command cannot be resolved to an executable."""
 
 
 DEFAULT_TELEGRAM_CONFIG_PATH = "./.vera/telegram_config.json"
@@ -36,6 +41,28 @@ class CommandSpec:
         if not argv:
             raise ConfigError("{} must contain an executable".format(field_name))
         return cls(raw=raw, argv=argv)
+
+    @property
+    def display(self) -> str:
+        return shlex.join(self.argv)
+
+    def resolve_executable(
+        self,
+        field_name: str,
+        cwd: Optional[Path] = None,
+    ) -> "CommandResolution":
+        return resolve_command_executable(self, field_name, cwd=cwd)
+
+
+@dataclass(frozen=True)
+class CommandResolution:
+    """A command with argv[0] resolved to an executable path."""
+
+    command: CommandSpec
+    field_name: str
+    executable: str
+    resolved_executable: Path
+    argv: Tuple[str, ...]
 
     @property
     def display(self) -> str:
@@ -289,6 +316,77 @@ def _optional_command(value: Optional[str], field_name: str) -> Optional[Command
     if text is None:
         return None
     return CommandSpec.parse(text, field_name)
+
+
+def resolve_command_executable(
+    command: CommandSpec,
+    field_name: str,
+    cwd: Optional[Path] = None,
+) -> CommandResolution:
+    executable = command.argv[0]
+    resolved = _resolve_executable_path(executable, cwd=cwd)
+    if resolved is None:
+        raise CommandResolutionError(
+            _missing_executable_message(field_name, executable, cwd=cwd)
+        )
+    return CommandResolution(
+        command=command,
+        field_name=field_name,
+        executable=executable,
+        resolved_executable=resolved,
+        argv=(str(resolved), *command.argv[1:]),
+    )
+
+
+def _resolve_executable_path(executable: str, cwd: Optional[Path]) -> Optional[Path]:
+    if _uses_explicit_path(executable):
+        candidate = _executable_candidate_path(executable, cwd=cwd)
+        if _is_executable_file(candidate):
+            return candidate
+        return None
+    found = shutil.which(executable)
+    if found is None:
+        return None
+    return Path(found).expanduser().resolve()
+
+
+def _uses_explicit_path(executable: str) -> bool:
+    return (
+        executable.startswith("~")
+        or os.sep in executable
+        or (os.altsep is not None and os.altsep in executable)
+    )
+
+
+def _executable_candidate_path(executable: str, cwd: Optional[Path]) -> Path:
+    candidate = Path(executable).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    base = cwd or Path.cwd()
+    return (base / candidate).resolve()
+
+
+def _is_executable_file(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def _missing_executable_message(field_name: str, executable: str, cwd: Optional[Path]) -> str:
+    displayed = shlex.quote(executable)
+    if _uses_explicit_path(executable):
+        candidate = _executable_candidate_path(executable, cwd=cwd)
+        return (
+            "{} executable not found or not executable: {} (resolved to {}). "
+            "Install the command or set {} to an absolute executable path. "
+            "For Codex, a typical value is '/path/to/codex app-server'."
+        ).format(field_name, displayed, candidate, field_name)
+    return (
+        "{} executable not found on PATH: {}. Install the command or set {} "
+        "to an absolute executable path. For Codex, a typical value is "
+        "'/path/to/codex app-server'."
+    ).format(field_name, displayed, field_name)
 
 
 def _parse_optional_string(value: Any, field_name: str) -> Optional[str]:

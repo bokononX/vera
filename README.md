@@ -65,10 +65,18 @@ mkdir -p .vera
 cp config/telegram.example.json .vera/telegram_config.json
 # Edit .vera/telegram_config.json with your allowed Telegram chat/user ids.
 export VERA_TELEGRAM_BOT_TOKEN="..."
+export VERA_CODEX_APP_SERVER_COMMAND="$(command -v codex) app-server"
 
 PYTHONPATH=src python3 -m vera_harness --check-config
 PYTHONPATH=src python3 -m vera_harness --monitor
 ```
+
+`VERA_CODEX_APP_SERVER_COMMAND` defaults to `codex app-server`. For live local
+runs, set it to the exact Codex executable that the monitor process can use.
+An absolute path from `command -v codex` is preferred when launching Vera from a
+venv, process manager, IDE, or another environment with a narrower `PATH`.
+Relative and `~` executable paths are resolved during readiness checks before
+the monitor changes into task workspaces.
 
 `--monitor` runs until interrupted. Use `--max-poll-cycles N` to stop after a
 bounded number of polling cycles, and `--poll-interval-seconds N` to control the
@@ -166,7 +174,7 @@ then exits.
 
 ```sh
 export VERA_TELEGRAM_BOT_TOKEN="..."
-export VERA_CODEX_APP_SERVER_COMMAND="codex app-server"
+export VERA_CODEX_APP_SERVER_COMMAND="$(command -v codex) app-server"
 
 PYTHONPATH=src python3 -m vera_harness --live-smoke
 ```
@@ -225,7 +233,10 @@ its Telegram values take precedence over those env vars. Do not put
 loader rejects secret fields.
 
 `--check-config` validates the complete live configuration without network
-calls and prints only a redacted token marker.
+calls, resolves the Codex app-server executable, and prints only a redacted
+token marker plus non-secret command readiness details. If Codex is unavailable,
+the command exits before any Telegram task is accepted and reports the missing
+`VERA_CODEX_APP_SERVER_COMMAND` executable.
 
 Other harness and Codex settings remain environment-backed:
 
@@ -268,9 +279,14 @@ Do not commit actual secret values. Documentation should name variables only.
   workspace metadata records `bootstrap_status`, command output, return code,
   and error text. Fix `VERA_REPO_CLONE_COMMAND`, `VERA_REPO_BOOTSTRAP_COMMAND`,
   or the workspace contents, then send a new Telegram task.
+- Codex readiness failure: `VERA_CODEX_APP_SERVER_COMMAND executable not found
+  on PATH: codex` means Codex is not available to the current Vera process.
+  Install Codex, start Vera from a shell with the right `PATH`, or set
+  `VERA_CODEX_APP_SERVER_COMMAND` to an absolute executable path such as
+  `/path/to/codex app-server`.
 - Codex startup failure: the task log reports `final_status: failed` with a
-  reason such as `failed to launch Codex app-server`. Check
-  `VERA_CODEX_APP_SERVER_COMMAND`, local Codex installation, and PATH.
+  reason such as `failed to launch Codex app-server`. Re-run `--check-config`
+  and check the configured Codex command plus local installation.
 - Approval required: the loop reports `final_status: approval_required` and
   Telegram receives a blocked status. Set a deliberate
   `VERA_CODEX_APPROVAL_DECISION` only when unattended approval is safe for the

@@ -1,6 +1,8 @@
 import contextlib
 import io
 import os
+import shlex
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,7 +35,16 @@ class CliConfigTests(unittest.TestCase):
             )
             output = io.StringIO()
 
-            with patch.dict(os.environ, {"VERA_TELEGRAM_BOT_TOKEN": "redacted-test-value"}, clear=True):
+            with patch.dict(
+                os.environ,
+                {
+                    "VERA_TELEGRAM_BOT_TOKEN": "redacted-test-value",
+                    "VERA_CODEX_APP_SERVER_COMMAND": "{} app-server".format(
+                        shlex.quote(sys.executable)
+                    ),
+                },
+                clear=True,
+            ):
                 with contextlib.redirect_stdout(output):
                     status = cli.main(["--check-config", "--telegram-config", str(config_path)])
 
@@ -43,6 +54,46 @@ class CliConfigTests(unittest.TestCase):
         self.assertIn("telegram_bot_token: <secret-present>", rendered)
         self.assertIn("allowed_chat_ids: 100", rendered)
         self.assertIn("telegram_poll_timeout_seconds: 9", rendered)
+        self.assertIn(
+            "codex_app_server_executable: {}".format(Path(sys.executable).resolve()),
+            rendered,
+        )
+        self.assertNotIn("redacted-test-value", rendered)
+
+    def test_check_config_fails_when_codex_executable_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            config_path.write_text(
+                """
+{
+  "telegram": {
+    "allowed_chat_ids": [100],
+    "state_path": "%s"
+  }
+}
+""".strip()
+                % Path(temp_dir, "state.json"),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "VERA_TELEGRAM_BOT_TOKEN": "redacted-test-value",
+                    "VERA_CODEX_APP_SERVER_COMMAND": "definitely-missing-codex app-server",
+                },
+                clear=True,
+            ):
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    status = cli.main(["--check-config", "--telegram-config", str(config_path)])
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        rendered = stderr.getvalue()
+        self.assertIn("VERA_CODEX_APP_SERVER_COMMAND executable not found on PATH", rendered)
+        self.assertIn("definitely-missing-codex", rendered)
         self.assertNotIn("redacted-test-value", rendered)
 
     def test_poll_once_loads_telegram_config_path(self):
@@ -142,6 +193,24 @@ class CliConfigTests(unittest.TestCase):
             "telegram.allowed_chat_ids or telegram.allowed_user_ids is required for live runs",
             stderr.getvalue(),
         )
+
+    def test_monitor_validates_codex_before_polling(self):
+        stderr = io.StringIO()
+
+        with patch.dict(
+            os.environ,
+            {
+                "VERA_TELEGRAM_BOT_TOKEN": "token-placeholder",
+                "VERA_ALLOWED_CHAT_IDS": "100",
+                "VERA_CODEX_APP_SERVER_COMMAND": "definitely-missing-codex app-server",
+            },
+            clear=True,
+        ):
+            with contextlib.redirect_stderr(stderr):
+                status = cli.main(["--monitor", "--max-poll-cycles", "1"])
+
+        self.assertEqual(status, 2)
+        self.assertIn("VERA_CODEX_APP_SERVER_COMMAND executable not found on PATH", stderr.getvalue())
 
 
 if __name__ == "__main__":

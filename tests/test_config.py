@@ -194,6 +194,27 @@ class HarnessConfigTests(unittest.TestCase):
                 with self.assertRaises(ConfigError):
                     HarnessConfig.from_env(env, require_secrets=False)
 
+    def test_command_resolution_expands_relative_executable_from_monitor_cwd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir, "bin", "codex")
+            executable.parent.mkdir()
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config = HarnessConfig.from_env(
+                {
+                    "VERA_CODEX_APP_SERVER_COMMAND": "./bin/codex app-server",
+                },
+                require_secrets=False,
+            )
+
+            resolution = config.codex_app_server_command.resolve_executable(
+                "VERA_CODEX_APP_SERVER_COMMAND",
+                cwd=Path(temp_dir),
+            )
+
+        self.assertEqual(resolution.resolved_executable, executable.resolve())
+        self.assertEqual(resolution.argv, (str(executable.resolve()), "app-server"))
+
 
 if __name__ == "__main__":
     unittest.main()

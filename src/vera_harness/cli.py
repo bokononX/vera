@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from .codex import CodexAppServerError
-from .config import ConfigError, HarnessConfig
+from .config import CommandResolution, ConfigError, HarnessConfig
 from .orchestrator import FakeCodexRuntime, VeraHarness, format_dry_run, format_poll_once, format_telegram_loop
 from .state import RunStateError
 from .telegram import TelegramApiError, TelegramLongPollingIntake, TelegramUpdateStore
@@ -225,6 +225,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 def _format_config_check(config: HarnessConfig) -> str:
+    codex_command = _validate_codex_app_server_command(config)
     unauthorized = config.telegram_unauthorized_response
     if unauthorized is None:
         unauthorized = "<disabled>"
@@ -244,6 +245,8 @@ def _format_config_check(config: HarnessConfig) -> str:
             "monthly_budget_usd: {}".format(_display_optional_config(config.monthly_budget_usd)),
             "project_budget_usd: {}".format(_display_optional_config(config.project_budget_usd)),
             "workspace_root: {}".format(config.workspace_root),
+            "codex_app_server_command: {}".format(config.codex_app_server_command.display),
+            "codex_app_server_executable: {}".format(codex_command.resolved_executable),
         ]
     )
 
@@ -254,12 +257,20 @@ def _display_optional_config(value: object) -> str:
     return str(value)
 
 
+def _validate_codex_app_server_command(config: HarnessConfig) -> CommandResolution:
+    return config.codex_app_server_command.resolve_executable(
+        "VERA_CODEX_APP_SERVER_COMMAND",
+        cwd=Path.cwd(),
+    )
+
+
 def _run_monitor(
     config: HarnessConfig,
     max_poll_cycles: Optional[int],
     poll_interval_seconds: float,
     title: str = "Vera Telegram-to-Codex loop",
 ) -> int:
+    _validate_codex_app_server_command(config)
     event_log = _console_event_log(config)
     harness = VeraHarness(config, on_event=event_log.append_task_event)
     cycles = 0
