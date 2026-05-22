@@ -66,6 +66,21 @@ Each task run records the selected memory page ids/paths in JSON run state, so
 debugging can inspect what memory influenced the prompt without reconstructing
 the full wiki disclosure.
 
+## Implemented Lint Boundary
+
+The harness can scan a configured user-memory corpus and produce a reviewable
+lint/consolidation report. The pass checks for duplicate candidates, orphan
+pages, stale pages, missing provenance/confidence metadata, unresolved
+contradictions, missing backlinks, generic relationship links that need
+explicit typing, and concept-level mismatches between durable values,
+tactical preferences, and low-level observations.
+
+Dry-run mode is the default. Controlled apply mode is limited to mechanical
+structure fixes: rebuilding the index, adding missing backlinks, demoting pages
+that exceed their `stale_after` window, and appending a lint/consolidation log
+entry. It does not merge duplicate identity claims, erase contradictions, or
+promote observations into values without review.
+
 ## Source
 
 - [Herald user memory wiki schema](../../docs/herald-user-memory-wiki-schema.md)

@@ -31,7 +31,10 @@ from .user_memory import (
     IngestOptions,
     SourceRetention,
     UserMemoryIngestError,
+    UserMemoryLintError,
+    WikiLintOptions,
     ingest_user_memory,
+    lint_user_memory,
     load_messages_from_file,
     messages_from_telegram_tasks,
     parse_datetime,
@@ -85,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--ingest-user-memory",
         action="store_true",
         help="Extract conversation memories and propose or apply user-memory wiki updates.",
+    )
+    parser.add_argument(
+        "--lint-user-memory",
+        action="store_true",
+        help="Scan a user-memory wiki and produce a reviewable lint/consolidation report.",
     )
     parser.add_argument(
         "--console-fake-state",
@@ -196,6 +204,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply the proposed user-memory wiki edits. Omit for dry-run review mode.",
     )
     parser.add_argument(
+        "--apply-memory-lint",
+        action="store_true",
+        help="Apply high-confidence mechanical lint fixes. Omit for dry-run report mode.",
+    )
+    parser.add_argument(
+        "--memory-lint-as-of",
+        default=None,
+        help="ISO-8601 timestamp used for deterministic stale-memory checks.",
+    )
+    parser.add_argument(
         "--captured-at",
         default=None,
         help="ISO-8601 captured timestamp for deterministic ingest output.",
@@ -217,14 +235,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.console_tui,
         args.console_gui,
         args.ingest_user_memory,
+        args.lint_user_memory,
     ]
     if sum(1 for selected in selected_modes if selected) > 1:
         parser.error(
-            "choose only one mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, or --check-config"
+            "choose only one mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, --lint-user-memory, or --check-config"
         )
     if not any(selected_modes):
         parser.error(
-            "choose a mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, or --check-config"
+            "choose a mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, --lint-user-memory, or --check-config"
         )
     if args.max_poll_cycles is not None and args.max_poll_cycles <= 0:
         parser.error("--max-poll-cycles must be greater than zero")
@@ -236,10 +255,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--console-view-only requires --console-tui")
     if args.apply_memory_ingest and not args.ingest_user_memory:
         parser.error("--apply-memory-ingest requires --ingest-user-memory")
+    if args.apply_memory_lint and not args.lint_user_memory:
+        parser.error("--apply-memory-lint requires --lint-user-memory")
 
     try:
         if args.ingest_user_memory:
             return _run_user_memory_ingest(args)
+        if args.lint_user_memory:
+            return _run_user_memory_lint(args)
         config = HarnessConfig.load(
             require_secrets=args.poll_once or args.check_config or args.monitor or args.live_smoke,
             telegram_config_path=args.telegram_config,
@@ -292,6 +315,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         RunStateError,
         TelegramApiError,
         UserMemoryIngestError,
+        UserMemoryLintError,
         ValueError,
         WorkspaceError,
     ) as exc:
@@ -339,6 +363,20 @@ def _run_user_memory_ingest(args: argparse.Namespace) -> int:
         apply=args.apply_memory_ingest,
     )
     print(plan.format_human_readable())
+    return 0
+
+
+def _run_user_memory_lint(args: argparse.Namespace) -> int:
+    as_of = parse_datetime(args.memory_lint_as_of) if args.memory_lint_as_of else None
+    report = lint_user_memory(
+        WikiLintOptions(
+            root=Path(args.memory_root).expanduser().resolve(),
+            owner_user=args.memory_user_id,
+            as_of=as_of,
+            apply=args.apply_memory_lint,
+        )
+    )
+    print(report.format_human_readable())
     return 0
 
 

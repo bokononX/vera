@@ -246,6 +246,24 @@ The default source-retention policy is `hash_only`: the ingest writes
 conversation text. Use `--memory-source-retention store` only when the source
 policy explicitly allows raw transcript storage.
 
+## User Memory Lint
+
+The harness can scan a user-memory corpus for schema drift, stale pages,
+duplicates, orphan pages, missing backlinks, unresolved contradictions, and
+generic relationship links that need explicit typing:
+
+```sh
+PYTHONPATH=src python3 -m vera_harness --lint-user-memory \
+  --memory-root tests/fixtures/user_memory_lint \
+  --memory-lint-as-of 2026-05-21T00:00:00Z
+```
+
+Dry-run mode prints a reviewable consolidation report and does not mutate
+files. Add `--apply-memory-lint` to apply only high-confidence mechanical
+fixes: index rebuilds, missing backlinks, stale status demotions, and a
+`log.md` lint/consolidation entry. Duplicate merges, concept-level changes,
+relationship type decisions, and contradiction resolution stay as review items.
+
 ## User Memory Prompt Retrieval
 
 Set `VERA_USER_MEMORY_ROOT` or `owner.user_memory_root` in the local Telegram
