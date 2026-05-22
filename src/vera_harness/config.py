@@ -26,7 +26,19 @@ class CommandResolutionError(ConfigError):
     """Raised when a configured command cannot be resolved to an executable."""
 
 
-DEFAULT_TELEGRAM_CONFIG_PATH = "./.vera/telegram_config.json"
+DEFAULT_RUNTIME_DIR = "./runtime"
+DEFAULT_TELEGRAM_CONFIG_PATH = "{}/telegram_config.json".format(DEFAULT_RUNTIME_DIR)
+DEFAULT_ASSISTANT_IDENTITY_PATH = "{}/assistant_identity.json".format(DEFAULT_RUNTIME_DIR)
+DEFAULT_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH = (
+    "{}/assistant_identity_interviews.json".format(DEFAULT_RUNTIME_DIR)
+)
+DEFAULT_TELEGRAM_STATE_PATH = "{}/telegram_state.json".format(DEFAULT_RUNTIME_DIR)
+DEFAULT_RUN_STATE_PATH = "{}/run_state.json".format(DEFAULT_RUNTIME_DIR)
+DEFAULT_CHAT_SESSION_STATE_PATH = "{}/chat_sessions.json".format(DEFAULT_RUNTIME_DIR)
+DEFAULT_IDENTITY_PROFILE_PATH = "{}/identity_profile.json".format(DEFAULT_RUNTIME_DIR)
+DEFAULT_IDENTITY_INTERVIEW_STATE_PATH = "{}/identity_interviews.json".format(DEFAULT_RUNTIME_DIR)
+DEFAULT_EVENT_LOG_PATH = "{}/events.jsonl".format(DEFAULT_RUNTIME_DIR)
+DEFAULT_WORKSPACE_ROOT = "{}/workspaces".format(DEFAULT_RUNTIME_DIR)
 
 
 @dataclass(frozen=True)
@@ -155,14 +167,14 @@ class HarnessConfig:
             _setting_value(
                 assistant_source,
                 "identity_path",
-                source.get("VERA_ASSISTANT_IDENTITY_PATH", "./.vera/assistant_identity.json"),
+                source.get("VERA_ASSISTANT_IDENTITY_PATH", DEFAULT_ASSISTANT_IDENTITY_PATH),
             ),
             "assistant.identity_path",
         )
         assistant_identity_interview_state_path = Path(
             source.get(
                 "VERA_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH",
-                "./.vera/assistant_identity_interviews.json",
+                DEFAULT_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH,
             )
         ).expanduser().resolve()
         assistant_identity = _parse_assistant_identity(
@@ -217,7 +229,7 @@ class HarnessConfig:
             _setting_value(
                 telegram_source,
                 "state_path",
-                source.get("VERA_TELEGRAM_STATE_PATH", "./.vera/telegram_state.json"),
+                source.get("VERA_TELEGRAM_STATE_PATH", DEFAULT_TELEGRAM_STATE_PATH),
             ),
             "telegram.state_path",
         )
@@ -230,16 +242,16 @@ class HarnessConfig:
             "telegram.unauthorized_response",
         )
         run_state_path = Path(
-            source.get("VERA_RUN_STATE_PATH", "./.vera/run_state.json")
+            source.get("VERA_RUN_STATE_PATH", DEFAULT_RUN_STATE_PATH)
         ).expanduser().resolve()
         chat_session_state_path = Path(
-            source.get("VERA_CHAT_SESSION_STATE_PATH", "./.vera/chat_sessions.json")
+            source.get("VERA_CHAT_SESSION_STATE_PATH", DEFAULT_CHAT_SESSION_STATE_PATH)
         ).expanduser().resolve()
         identity_profile_path = Path(
-            source.get("VERA_IDENTITY_PROFILE_PATH", "./.vera/identity_profile.json")
+            source.get("VERA_IDENTITY_PROFILE_PATH", DEFAULT_IDENTITY_PROFILE_PATH)
         ).expanduser().resolve()
         identity_interview_state_path = Path(
-            source.get("VERA_IDENTITY_INTERVIEW_STATE_PATH", "./.vera/identity_interviews.json")
+            source.get("VERA_IDENTITY_INTERVIEW_STATE_PATH", DEFAULT_IDENTITY_INTERVIEW_STATE_PATH)
         ).expanduser().resolve()
         user_memory_root = _parse_optional_path(
             _setting_value(
@@ -250,7 +262,7 @@ class HarnessConfig:
             "owner.user_memory_root",
         )
         event_log_path = Path(
-            source.get("VERA_EVENT_LOG_PATH", "./.vera/events.jsonl")
+            source.get("VERA_EVENT_LOG_PATH", DEFAULT_EVENT_LOG_PATH)
         ).expanduser().resolve()
         budget_snapshot_path = _parse_optional_path(
             source.get("VERA_BUDGET_SNAPSHOT_PATH"),
@@ -273,7 +285,7 @@ class HarnessConfig:
             )
 
         workspace_root = Path(
-            source.get("VERA_WORKSPACE_ROOT", "./.vera/workspaces")
+            source.get("VERA_WORKSPACE_ROOT", DEFAULT_WORKSPACE_ROOT)
         ).expanduser().resolve()
         codex_command = CommandSpec.parse(
             source.get("VERA_CODEX_APP_SERVER_COMMAND", "codex app-server"),

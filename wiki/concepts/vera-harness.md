@@ -122,6 +122,10 @@ runtime execution explicit:
   planning.
 - The harness should collect and persist only the task or chat-session metadata
   needed for restart/recovery.
+- Default local runtime state, event logs, Telegram config/state, identity
+  files, and managed workspaces belong under `./runtime`; legacy `./.vera`
+  state remains an explicit override/migration concern rather than an automatic
+  fallback.
 - Workspace identity should come from either the stable Telegram task/run id or
   stable Telegram chat-session id and map to a deterministic safe path segment
   under the configured workspace root.

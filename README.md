@@ -26,7 +26,7 @@ The command prints:
 - the fake-runtime final decision and structured event sequence;
 - confirmation that Telegram and Codex network/runtime calls were skipped.
 
-Dry runs default to `./.vera/workspaces` for local task workspaces. Workspace
+Dry runs default to `./runtime/workspaces` for local task workspaces. Workspace
 paths are derived from stable Telegram task ids, sanitized to a single safe path
 segment, and validated after resolution so symlinks cannot move Codex outside
 the configured workspace root. That path is ignored by git.
@@ -44,7 +44,7 @@ PYTHONPATH=src python3 -m vera_harness --fake-smoke \
   --user-id 200 \
   --message-id 300 \
   --update-id 700 \
-  --workspace-root ./.vera/fake-smoke-workspaces
+  --workspace-root ./runtime/fake-smoke-workspaces
 ```
 
 The command prints an operational log with the task id, Telegram chat/update/
@@ -62,9 +62,9 @@ app-server process, starts or resumes the Codex thread for that session, and
 sends the assistant's final response back to Telegram.
 
 ```sh
-mkdir -p .vera
-cp config/telegram.example.json .vera/telegram_config.json
-# Edit .vera/telegram_config.json with your allowed Telegram chat/user ids.
+mkdir -p runtime
+cp config/telegram.example.json runtime/telegram_config.json
+# Edit runtime/telegram_config.json with your allowed Telegram chat/user ids.
 export VERA_TELEGRAM_BOT_TOKEN="..."
 export VERA_CODEX_APP_SERVER_COMMAND="$(command -v codex) app-server"
 
@@ -206,7 +206,7 @@ PYTHONPATH=src python3 -m vera_harness --live-smoke
 ```
 
 No secret values belong in the repository. Keep bot tokens in the environment
-or another local secret manager, and keep `.vera/telegram_config.json` limited
+or another local secret manager, and keep `runtime/telegram_config.json` limited
 to non-secret allow-list and polling settings.
 
 Unauthorized chats/users are ignored by default. Set
@@ -219,7 +219,7 @@ as chat id, user id, message id, and lifecycle status. It does not persist raw
 Telegram message text or usernames.
 
 Persistent chat session state is stored at `VERA_CHAT_SESSION_STATE_PATH`
-(`./.vera/chat_sessions.json` by default). It records the Vera session id,
+(`./runtime/chat_sessions.json` by default). It records the Vera session id,
 Telegram chat/user mapping, workspace path, Codex thread id, last turn id, last
 known status, pending prompt, and last assistant response needed for local
 restart/recovery. It does not store raw inbound Telegram message text.
@@ -232,7 +232,7 @@ reviewable Herald user-memory wiki proposals:
 ```sh
 PYTHONPATH=src python3 -m vera_harness --ingest-user-memory \
   --conversation-file tests/fixtures/sample_conversation.txt \
-  --memory-root ./.vera/sample-memory \
+  --memory-root ./runtime/sample-memory \
   --memory-user-id user-example \
   --captured-at 2026-05-21T00:00:00Z
 ```
@@ -324,21 +324,21 @@ profile` and create/refine it through `/assistant identity`. That interview
 asks for name, mission, values, style, boundaries, relationship, proactivity,
 owner treatment, and transparency wording, then writes the profile only after
 explicit `confirm`. The profile is stored at `VERA_ASSISTANT_IDENTITY_PATH`
-(`./.vera/assistant_identity.json` by default). Active assistant-identity
+(`./runtime/assistant_identity.json` by default). Active assistant-identity
 interview state is stored separately at
 `VERA_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH`
-(`./.vera/assistant_identity_interviews.json` by default).
+(`./runtime/assistant_identity_interviews.json` by default).
 
 Identity/style onboarding is handled before Codex in persistent chat mode.
 The owner can send `/identity`, `/interview`, or a natural-language
 identity/style interview request from Telegram. Vera asks short progressive
 questions, summarizes proposed durable profile entries, and writes them only
 after explicit confirmation. Confirmed profile entries are stored at
-`VERA_IDENTITY_PROFILE_PATH` (`./.vera/identity_profile.json` by default) with
+`VERA_IDENTITY_PROFILE_PATH` (`./runtime/identity_profile.json` by default) with
 source, timestamp, confidence, and a correction path. Raw interview transcript
 and active interview state are kept separately at
 `VERA_IDENTITY_INTERVIEW_STATE_PATH`
-(`./.vera/identity_interviews.json` by default).
+(`./runtime/identity_interviews.json` by default).
 
 The owner can inspect stored facts with `/identity profile` and refine them
 with messages such as `that's wrong`, `forget that`, or
@@ -349,7 +349,7 @@ fixed personality label or a reason to flatter the owner.
 ## Configuration
 
 Telegram non-secret connectivity settings are read from a JSON config file.
-The default local path is `./.vera/telegram_config.json`, which is ignored by
+The default local path is `./runtime/telegram_config.json`, which is ignored by
 git. Use `--telegram-config /path/to/telegram.json` or
 `VERA_TELEGRAM_CONFIG_PATH=/path/to/telegram.json` to override it. The
 committed `config/telegram.example.json` file is a template only and must not
@@ -374,11 +374,11 @@ Recommended Telegram config:
     "api_base_url": "https://api.telegram.org",
     "poll_timeout_seconds": 30,
     "request_timeout_seconds": 35,
-    "state_path": "./.vera/telegram_state.json",
+    "state_path": "./runtime/telegram_state.json",
     "unauthorized_response": null
   },
   "assistant": {
-    "identity_path": "./.vera/assistant_identity.json",
+    "identity_path": "./runtime/assistant_identity.json",
     "name": "Vera",
     "short_description": "a personal assistant/minime for memory, thoughtful conversation, coordination, and clear thinking",
     "mission": "Help the owner think clearly, remember durable context, coordinate carefully, and turn intentions into reversible, well-governed action.",
@@ -430,6 +430,12 @@ its Telegram values take precedence over those env vars. Do not put
 `bot_token`, `telegram_bot_token`, or `VERA_TELEGRAM_BOT_TOKEN` in config; the
 loader rejects secret fields.
 
+Runtime directory migration is deliberately explicit: Vera does not
+automatically move or read legacy `./.vera` state after the default changes to
+`./runtime`. Existing installations can keep using legacy state by setting the
+corresponding `VERA_*_PATH` variables or CLI flags, or can move files into
+`./runtime` manually. Both local runtime directories are ignored by git.
+
 The optional top-level `assistant` block is non-secret local configuration for
 the assistant's user-facing identity. If `assistant.identity_path` points to an
 existing JSON profile, that profile overlays the inline assistant defaults and
@@ -446,7 +452,7 @@ are inserted into the initial owner-session Codex prompt and are not applied to
 other authorized users. To keep profile facts refreshable from the local/user
 wiki without code changes, set
 `owner.wiki_profile_path` to a Markdown file such as
-`./.vera/owner_profile.md`; Vera reads that file at startup and includes a
+`./runtime/owner_profile.md`; Vera reads that file at startup and includes a
 bounded excerpt in the owner prompt while console surfaces show only a redacted
 owner identity label by default.
 
@@ -462,17 +468,17 @@ Other harness and Codex settings remain environment-backed:
 | --- | --- | --- |
 | `VERA_TELEGRAM_BOT_TOKEN` | No | Telegram bot token. Required for `--monitor`, `--live-smoke`, `--poll-once`, and `--check-config`. |
 | `VERA_TELEGRAM_CONFIG_PATH` | No | Optional path to Telegram non-secret JSON config. Equivalent to `--telegram-config`. |
-| `VERA_ASSISTANT_IDENTITY_PATH` | No | Local JSON file for the active assistant identity profile. Defaults to `./.vera/assistant_identity.json`. |
-| `VERA_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH` | No | Local JSON file for assistant identity interview state and transcript. Defaults to `./.vera/assistant_identity_interviews.json`. |
-| `VERA_RUN_STATE_PATH` | No | Local JSON file for minimal orchestration run state. Defaults to `./.vera/run_state.json`. |
-| `VERA_CHAT_SESSION_STATE_PATH` | No | Local JSON file for persistent Telegram chat sessions and Codex thread ids. Defaults to `./.vera/chat_sessions.json`. |
-| `VERA_IDENTITY_PROFILE_PATH` | No | Local JSON file for confirmed owner identity/style profile entries. Defaults to `./.vera/identity_profile.json`. |
-| `VERA_IDENTITY_INTERVIEW_STATE_PATH` | No | Local JSON file for identity interview state and raw interview transcript. Defaults to `./.vera/identity_interviews.json`. |
-| `VERA_EVENT_LOG_PATH` | No | Local JSONL file for structured console events. Defaults to `./.vera/events.jsonl`. |
+| `VERA_ASSISTANT_IDENTITY_PATH` | No | Local JSON file for the active assistant identity profile. Defaults to `./runtime/assistant_identity.json`. |
+| `VERA_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH` | No | Local JSON file for assistant identity interview state and transcript. Defaults to `./runtime/assistant_identity_interviews.json`. |
+| `VERA_RUN_STATE_PATH` | No | Local JSON file for minimal orchestration run state. Defaults to `./runtime/run_state.json`. |
+| `VERA_CHAT_SESSION_STATE_PATH` | No | Local JSON file for persistent Telegram chat sessions and Codex thread ids. Defaults to `./runtime/chat_sessions.json`. |
+| `VERA_IDENTITY_PROFILE_PATH` | No | Local JSON file for confirmed owner identity/style profile entries. Defaults to `./runtime/identity_profile.json`. |
+| `VERA_IDENTITY_INTERVIEW_STATE_PATH` | No | Local JSON file for identity interview state and raw interview transcript. Defaults to `./runtime/identity_interviews.json`. |
+| `VERA_EVENT_LOG_PATH` | No | Local JSONL file for structured console events. Defaults to `./runtime/events.jsonl`. |
 | `VERA_BUDGET_SNAPSHOT_PATH` | No | Optional local JSON file with rate-limit and usage snapshots for the console budget bar. |
 | `VERA_MONTHLY_BUDGET_USD` | No | Optional monthly budget threshold shown in the console. |
 | `VERA_PROJECT_BUDGET_USD` | No | Optional project budget threshold shown in the console. |
-| `VERA_WORKSPACE_ROOT` | No | Root directory for per-task workspaces. Defaults to `./.vera/workspaces`. |
+| `VERA_WORKSPACE_ROOT` | No | Root directory for per-task workspaces. Defaults to `./runtime/workspaces`. |
 | `VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS` | No | Timeout for each configured workspace clone/bootstrap command. Defaults to `300`. |
 | `VERA_WORKSPACE_RETENTION_POLICY` | No | Retention policy recorded in workspace metadata: `retain`, `cleanup_on_success`, or `cleanup_on_completion`. Defaults to `retain`. |
 | `VERA_CODEX_APP_SERVER_COMMAND` | No | Shell-style command used to launch the Codex app server. Defaults to `codex app-server`. |
@@ -497,7 +503,7 @@ Do not commit actual secret values. Documentation should name variables only.
 - Missing allowed chat config:
   `telegram.allowed_chat_ids or telegram.allowed_user_ids is required for live runs`
   means the local Telegram config or environment lacks an allow-list. Add the
-  authorized chat and/or user ids to `.vera/telegram_config.json`.
+  authorized chat and/or user ids to `runtime/telegram_config.json`.
 - Workspace bootstrap failure: the loop reports `final_status: failed` and the
   workspace metadata records `bootstrap_status`, command output, return code,
   and error text. Fix `VERA_REPO_CLONE_COMMAND`, `VERA_REPO_BOOTSTRAP_COMMAND`,

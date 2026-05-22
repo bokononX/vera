@@ -175,6 +175,37 @@ class CliConfigTests(unittest.TestCase):
         self.assertIn("telegram_text: Completed.", rendered)
         self.assertNotIn("Sensitive fake smoke task text", rendered)
 
+    def test_fake_smoke_defaults_to_runtime_workspace_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = io.StringIO()
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(temp_dir)
+                with patch.dict(os.environ, {}, clear=True):
+                    with contextlib.redirect_stdout(output):
+                        status = cli.main(
+                            [
+                                "--fake-smoke",
+                                "--message",
+                                "Default runtime workspace task",
+                                "--chat-id",
+                                "100",
+                                "--user-id",
+                                "200",
+                                "--message-id",
+                                "300",
+                                "--update-id",
+                                "77",
+                            ]
+                        )
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertEqual(status, 0)
+            workspace = Path(temp_dir, "runtime", "workspaces", "telegram-100-300").resolve()
+            self.assertTrue(workspace.is_dir())
+            self.assertFalse(Path(temp_dir, ".vera").resolve().exists())
+
     def test_live_smoke_fails_clearly_without_required_live_config(self):
         stderr = io.StringIO()
 
