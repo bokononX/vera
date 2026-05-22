@@ -1,6 +1,8 @@
 # Herald User Memory
 
 The canonical schema design is [docs/herald-user-memory-wiki-schema.md](../../docs/herald-user-memory-wiki-schema.md).
+The [boss onboarding manual](../../docs/boss-onboarding-manual.md) governs how
+Vera turns owner-context gaps into questions and owner-confirmed memory.
 
 This page records the durable wiki-level shape of Herald user memory without
 duplicating the full schema.
@@ -109,6 +111,11 @@ persisted through the existing user-memory wiki as confirmed owner-provided
 context, with an `owner_question:<question_id>` locator and hash-only raw source
 retention. Secret-like answers are rejected for memory persistence.
 
+The queue must preserve the boss-onboarding boundary: observed or inferred
+context may create a question, but only an owner answer can create confirmed
+context about people, projects, preferences, boundaries, routines, decision
+rights, or voice.
+
 ## Implemented Lint Boundary
 
 The harness can scan a configured user-memory corpus and produce a reviewable
@@ -127,4 +134,5 @@ promote observations into values without review.
 ## Source
 
 - [Herald user memory wiki schema](../../docs/herald-user-memory-wiki-schema.md)
+- [Boss onboarding manual](../../docs/boss-onboarding-manual.md)
 - [Project concept document](../../docs/concept.md)
