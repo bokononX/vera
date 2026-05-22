@@ -246,6 +246,35 @@ The default source-retention policy is `hash_only`: the ingest writes
 conversation text. Use `--memory-source-retention store` only when the source
 policy explicitly allows raw transcript storage.
 
+## iMessage Contact Ingest
+
+Vera can optionally discover contact candidates from the local macOS Messages
+database without reading message bodies:
+
+```sh
+VERA_IMESSAGE_CONTACT_INGESTION_ENABLED=true \
+PYTHONPATH=src python3 -m vera_harness --ingest-imessage-contacts \
+  --memory-root ./runtime/sample-memory \
+  --memory-user-id user-example \
+  --captured-at 2026-05-21T00:00:00Z
+```
+
+Dry-run mode is the default and prints owner-facing clarification prompts such
+as `I noticed you text with <name or handle>. Who is this, and how should I
+understand them in your life?` without mutating files. Add
+`--apply-imessage-contacts` to persist candidates as user-memory `person` pages
+marked `memory_state: open_question`, `review_status: needs_user_review`, and
+`prompt_visibility: confirm_first`.
+
+This path is disabled by default. When enabled, it opens only
+`~/Library/Messages/chat.db` metadata tables (`handle`, `chat`, and
+`chat_handle_join`) through SQLite read-only mode and `query_only`; it does not
+select from `message`, does not inspect or summarize message text, does not
+embed message content, and does not send iMessages. macOS normally requires the
+shell or service running Vera to have Full Disk Access before `chat.db` can be
+read. Missing permissions or an unavailable database produce a clear operator
+error and no memory writes.
+
 ## User Memory Lint
 
 The harness can scan a user-memory corpus for schema drift, stale pages,
@@ -456,6 +485,11 @@ wiki without code changes, set
 bounded excerpt in the owner prompt while console surfaces show only a redacted
 owner identity label by default.
 
+The optional top-level `imessage` block configures read-only local Messages
+metadata ingestion. It is off unless `contact_ingestion_enabled` is `true`.
+`chat_db_path` defaults to `~/Library/Messages/chat.db`. This block must not
+contain secrets.
+
 `--check-config` validates the complete live configuration without network
 calls, resolves the Codex app-server executable, and prints only a redacted
 token marker plus non-secret command readiness details. If Codex is unavailable,
@@ -474,6 +508,8 @@ Other harness and Codex settings remain environment-backed:
 | `VERA_CHAT_SESSION_STATE_PATH` | No | Local JSON file for persistent Telegram chat sessions and Codex thread ids. Defaults to `./runtime/chat_sessions.json`. |
 | `VERA_IDENTITY_PROFILE_PATH` | No | Local JSON file for confirmed owner identity/style profile entries. Defaults to `./runtime/identity_profile.json`. |
 | `VERA_IDENTITY_INTERVIEW_STATE_PATH` | No | Local JSON file for identity interview state and raw interview transcript. Defaults to `./runtime/identity_interviews.json`. |
+| `VERA_IMESSAGE_CONTACT_INGESTION_ENABLED` | No | Opt-in flag for read-only iMessage contact metadata ingestion. Defaults to `false`. |
+| `VERA_IMESSAGE_CHAT_DB_PATH` | No | Local Messages database path for contact metadata ingestion. Defaults to `~/Library/Messages/chat.db`. |
 | `VERA_EVENT_LOG_PATH` | No | Local JSONL file for structured console events. Defaults to `./runtime/events.jsonl`. |
 | `VERA_BUDGET_SNAPSHOT_PATH` | No | Optional local JSON file with rate-limit and usage snapshots for the console budget bar. |
 | `VERA_MONTHLY_BUDGET_USD` | No | Optional monthly budget threshold shown in the console. |

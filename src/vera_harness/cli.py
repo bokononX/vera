@@ -16,6 +16,7 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 from .chat import ChatSessionStateError
 from .codex import CodexAppServerError
 from .config import CommandResolution, ConfigError, HarnessConfig
+from .imessage_contacts import IMessageContactIngestionError, ingest_imessage_contacts
 from .models import TelegramTask
 from .orchestrator import (
     FakeCodexRuntime,
@@ -93,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--lint-user-memory",
         action="store_true",
         help="Scan a user-memory wiki and produce a reviewable lint/consolidation report.",
+    )
+    parser.add_argument(
+        "--ingest-imessage-contacts",
+        action="store_true",
+        help="Discover iMessage contact candidates from local Messages metadata.",
     )
     parser.add_argument(
         "--console-fake-state",
@@ -209,6 +215,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply high-confidence mechanical lint fixes. Omit for dry-run report mode.",
     )
     parser.add_argument(
+        "--apply-imessage-contacts",
+        action="store_true",
+        help="Persist discovered iMessage contact candidates to user memory. Omit for dry-run report mode.",
+    )
+    parser.add_argument(
         "--memory-lint-as-of",
         default=None,
         help="ISO-8601 timestamp used for deterministic stale-memory checks.",
@@ -236,14 +247,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.console_gui,
         args.ingest_user_memory,
         args.lint_user_memory,
+        args.ingest_imessage_contacts,
     ]
     if sum(1 for selected in selected_modes if selected) > 1:
         parser.error(
-            "choose only one mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, --lint-user-memory, or --check-config"
+            "choose only one mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, --lint-user-memory, --ingest-imessage-contacts, or --check-config"
         )
     if not any(selected_modes):
         parser.error(
-            "choose a mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, --lint-user-memory, or --check-config"
+            "choose a mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, --lint-user-memory, --ingest-imessage-contacts, or --check-config"
         )
     if args.max_poll_cycles is not None and args.max_poll_cycles <= 0:
         parser.error("--max-poll-cycles must be greater than zero")
@@ -257,12 +269,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--apply-memory-ingest requires --ingest-user-memory")
     if args.apply_memory_lint and not args.lint_user_memory:
         parser.error("--apply-memory-lint requires --lint-user-memory")
+    if args.apply_imessage_contacts and not args.ingest_imessage_contacts:
+        parser.error("--apply-imessage-contacts requires --ingest-imessage-contacts")
 
     try:
         if args.ingest_user_memory:
             return _run_user_memory_ingest(args)
         if args.lint_user_memory:
             return _run_user_memory_lint(args)
+        if args.ingest_imessage_contacts:
+            return _run_imessage_contact_ingest(args)
         config = HarnessConfig.load(
             require_secrets=args.poll_once or args.check_config or args.monitor or args.live_smoke,
             telegram_config_path=args.telegram_config,
@@ -314,6 +330,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         PermissionError,
         RunStateError,
         TelegramApiError,
+        IMessageContactIngestionError,
         UserMemoryIngestError,
         UserMemoryLintError,
         ValueError,
@@ -380,6 +397,24 @@ def _run_user_memory_lint(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_imessage_contact_ingest(args: argparse.Namespace) -> int:
+    captured_at = parse_datetime(args.captured_at) if args.captured_at else None
+    config = HarnessConfig.load(
+        require_secrets=False,
+        telegram_config_path=args.telegram_config,
+    )
+    result = ingest_imessage_contacts(
+        enabled=config.imessage_contact_ingestion_enabled,
+        chat_db_path=config.imessage_chat_db_path,
+        memory_root=Path(args.memory_root).expanduser().resolve(),
+        owner_user=args.memory_user_id,
+        apply=args.apply_imessage_contacts,
+        captured_at=captured_at,
+    )
+    print(result.format_human_readable())
+    return 0
+
+
 def _format_config_check(config: HarnessConfig) -> str:
     codex_command = _validate_codex_app_server_command(config)
     unauthorized = config.telegram_unauthorized_response
@@ -407,6 +442,10 @@ def _format_config_check(config: HarnessConfig) -> str:
             "identity_profile_path: {}".format(config.identity_profile_path),
             "identity_interview_state_path: {}".format(config.identity_interview_state_path),
             "user_memory_root: {}".format(config.user_memory_root or "<not configured>"),
+            "imessage_contact_ingestion_enabled: {}".format(
+                "yes" if config.imessage_contact_ingestion_enabled else "no"
+            ),
+            "imessage_chat_db_path: {}".format(config.imessage_chat_db_path),
             "event_log_path: {}".format(config.event_log_path),
             "budget_snapshot_path: {}".format(config.budget_snapshot_path or "<not configured>"),
             "monthly_budget_usd: {}".format(_display_optional_config(config.monthly_budget_usd)),

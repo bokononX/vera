@@ -39,6 +39,7 @@ DEFAULT_IDENTITY_PROFILE_PATH = "{}/identity_profile.json".format(DEFAULT_RUNTIM
 DEFAULT_IDENTITY_INTERVIEW_STATE_PATH = "{}/identity_interviews.json".format(DEFAULT_RUNTIME_DIR)
 DEFAULT_EVENT_LOG_PATH = "{}/events.jsonl".format(DEFAULT_RUNTIME_DIR)
 DEFAULT_WORKSPACE_ROOT = "{}/workspaces".format(DEFAULT_RUNTIME_DIR)
+DEFAULT_IMESSAGE_CHAT_DB_PATH = "~/Library/Messages/chat.db"
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,8 @@ class HarnessConfig:
     identity_profile_path: Path
     identity_interview_state_path: Path
     user_memory_root: Optional[Path]
+    imessage_contact_ingestion_enabled: bool
+    imessage_chat_db_path: Path
     event_log_path: Path
     budget_snapshot_path: Optional[Path]
     monthly_budget_usd: Optional[float]
@@ -143,12 +146,14 @@ class HarnessConfig:
         telegram_config = _telegram_config_from_local(local_config)
         owner_config = _owner_config_from_local(local_config)
         assistant_config = _assistant_config_from_local(local_config)
+        imessage_config = _imessage_config_from_local(local_config)
         return cls.from_env(
             source,
             require_secrets=require_secrets,
             telegram_config=telegram_config,
             owner_config=owner_config,
             assistant_config=assistant_config,
+            imessage_config=imessage_config,
         )
 
     @classmethod
@@ -159,10 +164,12 @@ class HarnessConfig:
         telegram_config: Optional[Mapping[str, Any]] = None,
         owner_config: Optional[Mapping[str, Any]] = None,
         assistant_config: Optional[Mapping[str, Any]] = None,
+        imessage_config: Optional[Mapping[str, Any]] = None,
     ) -> "HarnessConfig":
         source = os.environ if env is None else env
         telegram_source = telegram_config or {}
         assistant_source = assistant_config or {}
+        imessage_source = imessage_config or {}
         assistant_identity_path = _parse_path(
             _setting_value(
                 assistant_source,
@@ -260,6 +267,23 @@ class HarnessConfig:
                 source.get("VERA_USER_MEMORY_ROOT"),
             ),
             "owner.user_memory_root",
+        )
+        imessage_contact_ingestion_enabled = _parse_bool(
+            _setting_value(
+                imessage_source,
+                "contact_ingestion_enabled",
+                source.get("VERA_IMESSAGE_CONTACT_INGESTION_ENABLED"),
+            ),
+            "imessage.contact_ingestion_enabled",
+            default=False,
+        )
+        imessage_chat_db_path = _parse_path(
+            _setting_value(
+                imessage_source,
+                "chat_db_path",
+                source.get("VERA_IMESSAGE_CHAT_DB_PATH", DEFAULT_IMESSAGE_CHAT_DB_PATH),
+            ),
+            "imessage.chat_db_path",
         )
         event_log_path = Path(
             source.get("VERA_EVENT_LOG_PATH", DEFAULT_EVENT_LOG_PATH)
@@ -359,6 +383,8 @@ class HarnessConfig:
             identity_profile_path=identity_profile_path,
             identity_interview_state_path=identity_interview_state_path,
             user_memory_root=user_memory_root,
+            imessage_contact_ingestion_enabled=imessage_contact_ingestion_enabled,
+            imessage_chat_db_path=imessage_chat_db_path,
             event_log_path=event_log_path,
             budget_snapshot_path=budget_snapshot_path,
             monthly_budget_usd=monthly_budget_usd,
@@ -606,6 +632,38 @@ def _assistant_config_from_local(local_config: Mapping[str, Any]) -> Optional[Ma
     return assistant_config
 
 
+def _imessage_config_from_local(local_config: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    if not local_config or "imessage" not in local_config:
+        return None
+    imessage_config = local_config["imessage"]
+    if not isinstance(imessage_config, dict):
+        raise ConfigError("imessage must be a JSON object")
+    forbidden = {
+        "api_key",
+        "bot_token",
+        "password",
+        "secret",
+        "telegram_bot_token",
+        "token",
+        "VERA_TELEGRAM_BOT_TOKEN",
+    }
+    present_forbidden = sorted(forbidden.intersection(imessage_config.keys()))
+    if present_forbidden:
+        raise ConfigError(
+            "iMessage config must not contain secret fields: {}".format(
+                ", ".join(present_forbidden)
+            )
+        )
+    allowed = {
+        "contact_ingestion_enabled",
+        "chat_db_path",
+    }
+    unknown = sorted(set(imessage_config.keys()) - allowed)
+    if unknown:
+        raise ConfigError("iMessage config contains unknown fields: {}".format(", ".join(unknown)))
+    return imessage_config
+
+
 def _parse_assistant_identity(
     assistant_config: Optional[Mapping[str, Any]],
     assistant_identity_path: Path,
@@ -770,6 +828,21 @@ def _parse_optional_float(value: Any, field_name: str) -> Optional[float]:
     if parsed < 0:
         raise ConfigError("{} must be zero or greater".format(field_name))
     return parsed
+
+
+def _parse_bool(value: Any, field_name: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        raise ConfigError("{} must be a boolean".format(field_name))
+    text = value.strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ConfigError("{} must be a boolean".format(field_name))
 
 
 def _parse_positive_int(value: Any, field_name: str, default: int) -> int:

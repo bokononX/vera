@@ -47,6 +47,12 @@ The default source-retention policy is `hash_only`: raw conversation text is
 not persisted, while source ids, hashes, locators, confidence, and claim
 summaries remain available for provenance and review.
 
+iMessage contact metadata ingest is a separate metadata-only source path. It
+does not extract claims from message content. Instead, it stores discovered
+handles as `person` pages marked as open questions needing owner review, with
+prompt visibility set to `confirm_first` so Vera can ask who the person is
+before treating the contact as relationship context.
+
 ## Implemented Prompt Retrieval Boundary
 
 The harness can now use a configured user-memory corpus during Telegram-to-Codex

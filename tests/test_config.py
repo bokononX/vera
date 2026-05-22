@@ -43,6 +43,8 @@ class HarnessConfigTests(unittest.TestCase):
                     "VERA_CODEX_AUTO_INPUT_RESPONSE": "Use the default option.",
                     "VERA_REPO_CLONE_COMMAND": "git clone git@example.test:repo.git .",
                     "VERA_REPO_BOOTSTRAP_COMMAND": "python3 -m unittest",
+                    "VERA_IMESSAGE_CONTACT_INGESTION_ENABLED": "true",
+                    "VERA_IMESSAGE_CHAT_DB_PATH": str(Path(temp_dir, "chat.db")),
                 }
             )
 
@@ -83,6 +85,8 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.codex_auto_input_response, "Use the default option.")
         self.assertIsNotNone(config.repo_clone_command)
         self.assertIsNotNone(config.repo_bootstrap_command)
+        self.assertTrue(config.imessage_contact_ingestion_enabled)
+        self.assertEqual(config.imessage_chat_db_path, Path(temp_dir, "chat.db").resolve())
 
     def test_dry_run_config_does_not_require_secrets(self):
         config = HarnessConfig.from_env({}, require_secrets=False)
@@ -110,6 +114,11 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.identity_interview_state_path, runtime_root / "identity_interviews.json")
         self.assertIsNone(config.user_memory_root)
         self.assertEqual(config.event_log_path, runtime_root / "events.jsonl")
+        self.assertFalse(config.imessage_contact_ingestion_enabled)
+        self.assertEqual(
+            config.imessage_chat_db_path,
+            Path("~/Library/Messages/chat.db").expanduser().resolve(),
+        )
         self.assertEqual(config.workspace_root, runtime_root / "workspaces")
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server"))
         self.assertEqual(config.max_retries, 1)
@@ -292,6 +301,32 @@ class HarnessConfigTests(unittest.TestCase):
             ("brief, precise, and candid",),
         )
 
+    def test_load_reads_imessage_contact_ingestion_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            chat_db_path = Path(temp_dir, "Messages", "chat.db")
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "telegram": {"allowed_user_ids": [200]},
+                        "imessage": {
+                            "contact_ingestion_enabled": True,
+                            "chat_db_path": str(chat_db_path),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = HarnessConfig.load(
+                {"VERA_TELEGRAM_BOT_TOKEN": "token-placeholder"},
+                telegram_config_path=str(config_path),
+                require_secrets=True,
+            )
+
+        self.assertTrue(config.imessage_contact_ingestion_enabled)
+        self.assertEqual(config.imessage_chat_db_path, chat_db_path.resolve())
+
     def test_explicit_missing_or_malformed_telegram_config_fails_clearly(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             missing_path = Path(temp_dir, "missing.json")
@@ -393,6 +428,7 @@ class HarnessConfigTests(unittest.TestCase):
             {"VERA_SANDBOX_MODE": "open"},
             {"VERA_CODEX_APPROVAL_DECISION": "approve"},
             {"VERA_CODEX_APP_SERVER_COMMAND": ""},
+            {"VERA_IMESSAGE_CONTACT_INGESTION_ENABLED": "maybe"},
         ]
 
         for env in invalid_cases:

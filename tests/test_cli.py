@@ -347,5 +347,59 @@ class CliUserMemoryLintTests(unittest.TestCase):
         self.assertFalse((memory_root / "log.md").exists())
 
 
+class CliIMessageContactTests(unittest.TestCase):
+    def test_imessage_contact_ingest_disabled_does_not_require_messages_access(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {}, clear=True):
+                with contextlib.redirect_stdout(stdout):
+                    status = cli.main(
+                        [
+                            "--ingest-imessage-contacts",
+                            "--memory-root",
+                            str(Path(temp_dir, "memory")),
+                            "--memory-user-id",
+                            "user-test",
+                        ]
+                    )
+
+            rendered = stdout.getvalue()
+
+        self.assertEqual(status, 0)
+        self.assertIn("iMessage contact ingestion disabled", rendered)
+        self.assertIn("No Messages database was opened", rendered)
+
+    def test_imessage_contact_ingest_enabled_reports_missing_chat_db_clearly(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stderr = io.StringIO()
+            missing_db = Path(temp_dir, "missing-chat.db")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "VERA_IMESSAGE_CONTACT_INGESTION_ENABLED": "true",
+                    "VERA_IMESSAGE_CHAT_DB_PATH": str(missing_db),
+                },
+                clear=True,
+            ):
+                with contextlib.redirect_stderr(stderr):
+                    status = cli.main(
+                        [
+                            "--ingest-imessage-contacts",
+                            "--memory-root",
+                            str(Path(temp_dir, "memory")),
+                            "--memory-user-id",
+                            "user-test",
+                        ]
+                    )
+
+            rendered = stderr.getvalue()
+
+        self.assertEqual(status, 2)
+        self.assertIn("iMessage chat.db not found", rendered)
+        self.assertIn("Full Disk Access", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
