@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, replace
-from typing import Callable, Dict, List, Optional, Protocol, Tuple
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+from zoneinfo import ZoneInfo
 
 from .assistant_identity import (
     AssistantIdentityController,
@@ -27,6 +29,24 @@ from .codex import (
     CodexSessionMetadata,
 )
 from .config import HarnessConfig
+from .heartbeat import (
+    HeartbeatAction,
+    HeartbeatContext,
+    HeartbeatDecision,
+    HeartbeatState,
+    HeartbeatTickResult,
+    HeartbeatTickStatus,
+    JsonHeartbeatStateStore,
+    build_heartbeat_task,
+    guarded_decision,
+    heartbeat_due,
+    is_quiet_time,
+    prune_recent_topics,
+    record_tick,
+    render_heartbeat_prompt,
+    reset_daily_window,
+    parse_heartbeat_decision,
+)
 from .identity import (
     IdentityInterviewController,
     JsonIdentityInterviewStore,
@@ -49,6 +69,7 @@ from .models import (
 from .prompt import PromptPolicy, build_prompt_policy
 from .state import JsonRunStateStore
 from .telegram import (
+    TelegramBotApi,
     TelegramIntake,
     TelegramIntakeOutcome,
     TelegramLongPollingIntake,
@@ -275,6 +296,49 @@ class VeraHarness:
         if not self._owner_identity_commands_allowed(task):
             return ()
         return self._identity.profile_prompt_lines()
+
+    def _heartbeat_owner_user_id(self) -> int:
+        if self._config.owner_profile is not None:
+            return self._config.owner_profile.user_id
+        if len(self._config.allowed_user_ids) == 1:
+            return self._config.allowed_user_ids[0]
+        return 0
+
+    def _heartbeat_context(
+        self,
+        state: HeartbeatState,
+        owner_user_id: int,
+        now: datetime,
+    ) -> HeartbeatContext:
+        heartbeat_config = self._config.heartbeat
+        owner_chat_id = heartbeat_config.owner_chat_id
+        session = (
+            self._chat_store.session_for_ids(owner_chat_id, owner_user_id)
+            if owner_chat_id is not None
+            else None
+        )
+        owner_chat_authorized = (
+            owner_chat_id is not None
+            and (not self._config.allowed_chat_ids or owner_chat_id in self._config.allowed_chat_ids)
+            and (not self._config.allowed_user_ids or owner_user_id in self._config.allowed_user_ids)
+        )
+        local_time = now.astimezone(ZoneInfo(heartbeat_config.timezone)).isoformat()
+        return HeartbeatContext(
+            local_time=local_time,
+            timezone=heartbeat_config.timezone,
+            owner_profile_configured=self._config.owner_profile is not None,
+            owner_chat_configured=owner_chat_id is not None,
+            owner_chat_authorized=owner_chat_authorized,
+            chat_session_exists=session is not None,
+            chat_turns_completed=session.turns_completed if session is not None else 0,
+            chat_last_status=session.last_status if session is not None else None,
+            chat_pending_prompt=bool(session.pending_prompt) if session is not None else False,
+            daily_initiations=state.daily_initiations,
+            max_daily_initiations=heartbeat_config.max_daily_initiations,
+            recent_topic_count=len(state.recent_topics),
+            last_decision=state.last_decision,
+            last_reason_category=state.last_reason_category,
+        )
 
     def _user_memory_context_for_task(self, task: TelegramTask) -> Optional[UserMemoryPromptContext]:
         root = self._config.user_memory_root
@@ -796,6 +860,207 @@ class VeraHarness:
             poll_result=poll_result,
             chat_turns=tuple(turns),
             response_deliveries=tuple(responses),
+        )
+
+    def run_heartbeat_tick(
+        self,
+        runtime: Optional[CodexRuntime] = None,
+        telegram_api: Optional[Any] = None,
+        now: Optional[datetime] = None,
+        create_workspace: bool = True,
+        workspace_policy: WorkspaceReusePolicy = WorkspaceReusePolicy.REUSE,
+        run_bootstrap: bool = True,
+    ) -> HeartbeatTickResult:
+        """Evaluate one proactive heartbeat tick without blocking Telegram intake."""
+
+        heartbeat_config = self._config.heartbeat
+        current_time = now or datetime.now(timezone.utc)
+        if not heartbeat_config.enabled:
+            return HeartbeatTickResult(
+                status=HeartbeatTickStatus.DISABLED,
+                reason_category="disabled",
+                dry_run=heartbeat_config.dry_run,
+                owner_chat_id=heartbeat_config.owner_chat_id,
+            )
+
+        state_store = JsonHeartbeatStateStore(heartbeat_config.state_path)
+        state = state_store.load()
+        state = reset_daily_window(heartbeat_config, state, current_time)
+        state = prune_recent_topics(heartbeat_config, state, current_time)
+        if not heartbeat_due(heartbeat_config, state, current_time):
+            return HeartbeatTickResult(
+                status=HeartbeatTickStatus.SKIPPED,
+                reason_category="cadence",
+                dry_run=heartbeat_config.dry_run,
+                owner_chat_id=heartbeat_config.owner_chat_id,
+            )
+
+        if is_quiet_time(heartbeat_config, current_time):
+            decision = HeartbeatDecision(
+                action=HeartbeatAction.DO_NOTHING,
+                reason_category="quiet_hours",
+            )
+            state_store.save(
+                record_tick(
+                    heartbeat_config,
+                    state,
+                    current_time,
+                    decision=decision,
+                    initiated=False,
+                    topic_fingerprint_value=None,
+                )
+            )
+            return HeartbeatTickResult(
+                status=HeartbeatTickStatus.SKIPPED,
+                reason_category="quiet_hours",
+                decision=decision,
+                dry_run=heartbeat_config.dry_run,
+                owner_chat_id=heartbeat_config.owner_chat_id,
+                details={"timezone": heartbeat_config.timezone},
+            )
+
+        owner_user_id = self._heartbeat_owner_user_id()
+        context = self._heartbeat_context(state, owner_user_id, current_time)
+        task = build_heartbeat_task(heartbeat_config, owner_user_id, current_time)
+        assistant_identity = self._assistant_identity.active_identity()
+        policy = build_prompt_policy(
+            task,
+            assistant_identity=assistant_identity,
+            owner_profile=self._config.owner_profile,
+            owner_profile_facts=self._owner_profile_facts_for_task(task),
+            user_memory_context=None,
+        )
+        prompt = render_heartbeat_prompt(policy, context)
+        workspace_id = "heartbeat-owner"
+        try:
+            workspace = self._workspaces.prepare_workspace_for_id(
+                workspace_id,
+                task_id=workspace_id,
+                policy=workspace_policy,
+                create=create_workspace,
+                run_bootstrap=run_bootstrap and not heartbeat_config.dry_run,
+            )
+        except WorkspaceBootstrapError as exc:
+            decision = HeartbeatDecision(
+                action=HeartbeatAction.DO_NOTHING,
+                reason_category="workspace_failed",
+            )
+            state_store.save(
+                record_tick(
+                    heartbeat_config,
+                    state,
+                    current_time,
+                    decision=decision,
+                    initiated=False,
+                    topic_fingerprint_value=None,
+                )
+            )
+            return HeartbeatTickResult(
+                status=HeartbeatTickStatus.FAILED,
+                reason_category="workspace_failed",
+                decision=decision,
+                dry_run=heartbeat_config.dry_run,
+                owner_chat_id=heartbeat_config.owner_chat_id,
+                error=str(exc),
+            )
+
+        invocation = self._planner.plan(workspace, prompt)
+        selected_runtime = runtime or self._runtime
+        run_result = selected_runtime.run_turn(invocation)
+        if run_result.status != CodexRunStatus.COMPLETED:
+            decision = HeartbeatDecision(
+                action=HeartbeatAction.DO_NOTHING,
+                reason_category="runtime_failed",
+            )
+            state_store.save(
+                record_tick(
+                    heartbeat_config,
+                    state,
+                    current_time,
+                    decision=decision,
+                    initiated=False,
+                    topic_fingerprint_value=None,
+                )
+            )
+            return HeartbeatTickResult(
+                status=HeartbeatTickStatus.FAILED,
+                reason_category="runtime_failed",
+                decision=decision,
+                dry_run=heartbeat_config.dry_run,
+                owner_chat_id=heartbeat_config.owner_chat_id,
+                runtime_status=run_result.status.value,
+                error=run_result.error,
+            )
+
+        parsed_decision = parse_heartbeat_decision(run_result.assistant_response)
+        decision, should_initiate, fingerprint = guarded_decision(
+            heartbeat_config,
+            state,
+            parsed_decision,
+            current_time,
+        )
+        if should_initiate and not context.owner_chat_authorized:
+            decision = HeartbeatDecision(
+                action=HeartbeatAction.DO_NOTHING,
+                reason_category="owner_chat_unauthorized",
+            )
+            should_initiate = False
+            fingerprint = None
+        message_sent = False
+        error = None
+        if should_initiate and not heartbeat_config.dry_run:
+            api = telegram_api or TelegramBotApi(
+                bot_token=self._config.telegram_bot_token or "",
+                api_base_url=self._config.telegram_api_base_url,
+                request_timeout_seconds=self._config.telegram_request_timeout_seconds,
+            )
+            try:
+                api.send_message(
+                    chat_id=heartbeat_config.owner_chat_id,
+                    text=decision.message or "",
+                )
+                message_sent = True
+            except Exception as exc:  # noqa: BLE001 - transport failure is recorded as heartbeat metadata.
+                error = str(exc)
+
+        initiated = should_initiate and (heartbeat_config.dry_run or message_sent)
+        state_store.save(
+            record_tick(
+                heartbeat_config,
+                state,
+                current_time,
+                decision=decision,
+                initiated=initiated,
+                topic_fingerprint_value=fingerprint,
+            )
+        )
+        if error is not None:
+            return HeartbeatTickResult(
+                status=HeartbeatTickStatus.FAILED,
+                reason_category="transport_error",
+                decision=decision,
+                message_sent=False,
+                would_send=True,
+                dry_run=heartbeat_config.dry_run,
+                owner_chat_id=heartbeat_config.owner_chat_id,
+                topic_fingerprint=fingerprint,
+                runtime_status=run_result.status.value,
+                error=error,
+            )
+        return HeartbeatTickResult(
+            status=HeartbeatTickStatus.DECIDED,
+            reason_category=decision.reason_category,
+            decision=decision,
+            message_sent=message_sent,
+            would_send=should_initiate,
+            dry_run=heartbeat_config.dry_run,
+            owner_chat_id=heartbeat_config.owner_chat_id,
+            topic_fingerprint=fingerprint,
+            runtime_status=run_result.status.value,
+            details={
+                "daily_initiations": state.daily_initiations + (1 if initiated else 0),
+                "max_daily_initiations": heartbeat_config.max_daily_initiations,
+            },
         )
 
     def run_chat_turn(

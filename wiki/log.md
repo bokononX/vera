@@ -1,5 +1,8 @@
 # Change log
 
+- 2026-05-22: Updated the Vera harness concept with opt-in proactive
+  heartbeat monitoring, policy-governed owner-chat sends, metadata-only
+  heartbeat state/logging, dry-run behavior, and cadence/windowing safeguards.
 - 2026-05-22: Updated the Vera harness concept with the `./runtime` default
   local runtime directory and explicit legacy `./.vera` migration boundary.
 - 2026-05-21: Updated the Herald user memory concept with implemented Telegram
