@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
+from .chat import session_id_for_telegram
 from .models import TelegramTask
 
 
@@ -37,11 +38,20 @@ class MemoryState(str, Enum):
     OBSERVED_PATTERN = "observed_pattern"
     OPEN_QUESTION = "open_question"
     CORRECTION = "correction"
+    RETRACTED = "retracted"
 
 
 class SourceRetention(str, Enum):
     HASH_ONLY = "hash_only"
     STORE = "store"
+
+
+class MemorySensitivity(str, Enum):
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    PRIVATE = "private"
+    RESTRICTED = "restricted"
+    SECRET = "secret"
 
 
 class UserMemoryTaskType(str, Enum):
@@ -83,6 +93,15 @@ INDEX_HEADINGS: Mapping[PageType, str] = {
 
 SECRET_RE = re.compile(
     r"\b(password|passcode|secret|api[_ -]?key|private key|token|credential)\b",
+    re.IGNORECASE,
+)
+
+RESTRICTED_RE = re.compile(
+    r"\b("
+    r"medical|health|diagnosis|therapy|therapist|doctor|medication|hospital|"
+    r"finance|financial|bank|payment|salary|debt|tax|legal|lawyer|lawsuit|"
+    r"identity|passport|ssn|social security|address|location|safety"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -244,6 +263,7 @@ class IngestPlan:
     owner_user: str
     source_record: SourceRecord
     candidates: Tuple[MemoryCandidate, ...]
+    confirmation_required_candidates: Tuple[MemoryCandidate, ...]
     edits: Tuple[ProposedWikiEdit, ...]
     contradictions: Tuple[ContradictionRecord, ...]
     withheld_secret_count: int
@@ -262,6 +282,9 @@ class IngestPlan:
                 "yes" if self.source_record.retention == SourceRetention.STORE else "no"
             ),
             "candidates: {}".format(len(self.candidates)),
+            "confirmation_required_candidates: {}".format(
+                len(self.confirmation_required_candidates)
+            ),
             "withheld_secret_candidates: {}".format(self.withheld_secret_count),
             "",
             "Proposed wiki edits:",
@@ -284,13 +307,20 @@ class IngestPlan:
             )
             lines.append("  claim: {}".format(edit.candidate.claim))
         lines.extend(["", "Review queue changes:"])
-        if not self.contradictions:
+        if not self.contradictions and not self.confirmation_required_candidates:
             lines.append("- none")
         for contradiction in self.contradictions:
             lines.append(
                 "- review/contradictions.md: {} conflicts with existing {}".format(
                     contradiction.new_summary,
                     contradiction.path,
+                )
+            )
+        for candidate in self.confirmation_required_candidates:
+            lines.append(
+                "- review/pending.md: high-sensitivity inferred memory requires explicit confirmation before wiki storage [{}; source: {}]".format(
+                    candidate.sensitivity,
+                    candidate.source_refs[0].source_id if candidate.source_refs else "unknown-source",
                 )
             )
         lines.extend(["", "Index/log changes:"])
@@ -343,6 +373,8 @@ class UserMemoryPage:
     source_refs: Tuple[UserMemorySourceRef, ...]
     tags: Tuple[str, ...]
     related: Tuple[str, ...]
+    supersedes: Tuple[str, ...]
+    superseded_by: Tuple[str, ...]
     contradictions: Tuple[str, ...]
     corrections: Tuple[str, ...]
     summary: str
@@ -431,6 +463,97 @@ class UserMemoryPromptContext:
                 ]
             )
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class _MemoryControlCommand:
+    action: str
+    query: str = ""
+    replacement: str = ""
+    sensitivity: str = ""
+
+
+class UserMemoryControlController:
+    """Owner-facing Telegram controls for inspecting and changing user memory."""
+
+    def __init__(self) -> None:
+        self._last_matches: Dict[str, Tuple[str, ...]] = {}
+
+    def handle(self, task: TelegramTask, root: Optional[Path]) -> Optional[str]:
+        command = _parse_memory_control_command(task.text)
+        if command is None:
+            return None
+        if root is None:
+            return (
+                "User memory is not configured. Set `VERA_USER_MEMORY_ROOT` or "
+                "`owner.user_memory_root` before using memory controls."
+            )
+        memory_root = root.expanduser().resolve()
+        session_id = session_id_for_telegram(task.chat_id, task.user_id)
+        if command.action == "help":
+            return _format_memory_control_help()
+        if command.action == "recent":
+            return _format_recent_memory_updates(memory_root)
+        if command.action == "list":
+            pages = _find_memory_control_matches(
+                memory_root,
+                command.query,
+                self._last_matches.get(session_id, ()),
+            )
+            self._remember_matches(session_id, pages)
+            return _format_memory_control_list(command.query, pages)
+        if command.action == "correct":
+            pages = _find_memory_control_matches(
+                memory_root,
+                command.query,
+                self._last_matches.get(session_id, ()),
+                limit=1,
+            )
+            if not pages:
+                return _no_memory_match_response(command.query)
+            response = _apply_memory_correction(
+                memory_root,
+                pages[0],
+                command.replacement,
+                task,
+            )
+            self._remember_matches(session_id, (load_user_memory_page(memory_root, pages[0].relative_path),))
+            return response
+        if command.action == "forget":
+            pages = _find_memory_control_matches(
+                memory_root,
+                command.query,
+                self._last_matches.get(session_id, ()),
+                limit=1,
+            )
+            if not pages:
+                return _no_memory_match_response(command.query)
+            response = _apply_memory_forget(memory_root, pages, task)
+            self._last_matches[session_id] = ()
+            return response
+        if command.action == "mark":
+            pages = _find_memory_control_matches(
+                memory_root,
+                command.query,
+                self._last_matches.get(session_id, ()),
+                limit=1,
+            )
+            if not pages:
+                return _no_memory_match_response(command.query)
+            response = _apply_memory_sensitivity_mark(
+                memory_root,
+                pages[0],
+                command.sensitivity,
+                task,
+            )
+            self._remember_matches(session_id, (load_user_memory_page(memory_root, pages[0].relative_path),))
+            return response
+        return None
+
+    def _remember_matches(self, session_id: str, pages: Sequence[Optional["UserMemoryPage"]]) -> None:
+        self._last_matches[session_id] = tuple(
+            page.relative_path for page in pages if page is not None
+        )
 
 
 def retrieve_user_memory_for_task(
@@ -555,6 +678,307 @@ def load_user_memory_pages(root: Path) -> Tuple[UserMemoryPage, ...]:
         if page is not None:
             pages.append(page)
     return tuple(pages)
+
+
+def load_user_memory_page(root: Path, relative_path: str) -> Optional[UserMemoryPage]:
+    """Load one synthesized wiki page by corpus-relative path."""
+
+    root = root.expanduser().resolve()
+    path = (root / relative_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    if not path.exists():
+        return None
+    return _load_user_memory_page(path, root)
+
+
+def _parse_memory_control_command(text: str) -> Optional[_MemoryControlCommand]:
+    stripped = _clean_sentence(text)
+    lower = stripped.lower()
+    if lower in {"/memory", "/memory help", "memory help", "help memory"}:
+        return _MemoryControlCommand(action="help")
+    if lower in {"/memory recent", "show recent memory updates", "recent memory updates"}:
+        return _MemoryControlCommand(action="recent")
+    match = re.match(r"^/memory\s+recent(?:\s+\d+)?$", lower)
+    if match:
+        return _MemoryControlCommand(action="recent")
+    for prefix in ("/memory correct ", "correct "):
+        if lower.startswith(prefix):
+            body = stripped[len(prefix) :].strip()
+            correction = re.match(r"(?P<query>.+?)\s+to\s+(?P<replacement>.+)$", body, flags=re.IGNORECASE)
+            if correction:
+                return _MemoryControlCommand(
+                    action="correct",
+                    query=correction.group("query").strip(),
+                    replacement=correction.group("replacement").strip(),
+                )
+    for prefix in ("/memory forget", "forget"):
+        if lower == prefix or lower.startswith("{} ".format(prefix)):
+            query = stripped[len(prefix) :].strip()
+            return _MemoryControlCommand(action="forget", query=query or "this")
+    mark = re.match(
+        r"^(?:/memory\s+)?mark\s+(?P<query>.+?)\s+as\s+(?P<sensitivity>public|internal|private|sensitive|restricted|secret)$",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if mark:
+        return _MemoryControlCommand(
+            action="mark",
+            query=mark.group("query").strip(),
+            sensitivity=_normalize_control_sensitivity(mark.group("sensitivity")),
+        )
+    remember = re.match(
+        r"^(?:/memory\s+show\s+|/memory\s+search\s+)?what do you remember(?: about)?\s*(?P<query>.*?)\??$",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if remember and (remember.group("query") or lower.startswith("/memory")):
+        return _MemoryControlCommand(
+            action="list",
+            query=remember.group("query").strip() or "memory",
+        )
+    for prefix in ("/memory show ", "/memory search "):
+        if lower.startswith(prefix):
+            return _MemoryControlCommand(action="list", query=stripped[len(prefix) :].strip())
+    return None
+
+
+def _normalize_control_sensitivity(value: str) -> str:
+    lower = value.strip().lower()
+    if lower == "sensitive":
+        return MemorySensitivity.RESTRICTED.value
+    try:
+        return MemorySensitivity(lower).value
+    except ValueError:
+        return MemorySensitivity.PRIVATE.value
+
+
+def _format_memory_control_help() -> str:
+    return "\n".join(
+        [
+            "User memory controls:",
+            "- `what do you remember about X?` lists matching memory with source and confidence metadata.",
+            "- `correct X to Y` records a correction and updates the active claim used for retrieval.",
+            "- `forget X` deletes matching synthesized memory and tombstones source references when policy requires it.",
+            "- `mark X as private` or `mark this as sensitive` changes sensitivity and prompt visibility.",
+            "- `show recent memory updates` shows recent memory audit log entries.",
+        ]
+    )
+
+
+def _find_memory_control_matches(
+    root: Path,
+    query: str,
+    last_paths: Sequence[str],
+    limit: int = 5,
+) -> Tuple[UserMemoryPage, ...]:
+    normalized_query = _clean_sentence(query).strip()
+    if normalized_query.lower() in {"this", "that"} and last_paths:
+        pages = tuple(
+            page
+            for page in (load_user_memory_page(root, path) for path in last_paths)
+            if page is not None and not _page_is_deleted_or_unusable(page)
+        )
+        return pages[:limit]
+    pages = tuple(page for page in load_user_memory_pages(root) if not _page_is_deleted_or_unusable(page))
+    if not normalized_query:
+        return pages[:limit]
+    if normalized_query.isdigit() and last_paths:
+        index = int(normalized_query) - 1
+        if 0 <= index < len(last_paths):
+            page = load_user_memory_page(root, last_paths[index])
+            if page is not None and not _page_is_deleted_or_unusable(page):
+                return (page,)
+    query_tokens = _tokenize_for_retrieval(normalized_query)
+    scored: List[Tuple[float, UserMemoryPage]] = []
+    query_lower = normalized_query.lower()
+    for page in pages:
+        score = _memory_relevance_score(page, query_tokens, UserMemoryTaskType.MEMORY_MAINTENANCE)
+        haystack = " ".join(
+            [
+                page.title,
+                page.relative_path,
+                page.summary,
+                page.body_text,
+                " ".join(page.tags),
+            ]
+        ).lower()
+        if query_lower and query_lower in haystack:
+            score += 4.0
+        if score > 0:
+            scored.append((score, page))
+    ranked = sorted(
+        scored,
+        key=lambda item: (
+            -item[0],
+            _memory_control_page_rank(item[1]),
+            _memory_state_rank(item[1]),
+            item[1].relative_path,
+        ),
+    )
+    return tuple(page for _, page in ranked[:limit])
+
+
+def _memory_control_page_rank(page: UserMemoryPage) -> int:
+    if page.page_type == PageType.CORRECTION or page.memory_state == MemoryState.CORRECTION.value:
+        return 1
+    return 0
+
+
+def _format_memory_control_list(query: str, pages: Sequence[UserMemoryPage]) -> str:
+    if not pages:
+        return _no_memory_match_response(query)
+    lines = ["I found {} remembered claim(s) for `{}`:".format(len(pages), query or "memory")]
+    for index, page in enumerate(pages, start=1):
+        summary = page.summary
+        if page.sensitivity == MemorySensitivity.SECRET.value:
+            summary = "Details withheld because this memory is classified as `secret`."
+        lines.extend(
+            [
+                "",
+                "{}. {} - {}".format(index, page.title, summary),
+                "   path: {}".format(page.relative_path),
+                "   state: {}; confidence: {}; sensitivity: {}; visibility: {}; review: {}".format(
+                    page.memory_state,
+                    page.confidence_level,
+                    page.sensitivity,
+                    page.prompt_visibility,
+                    page.review_status,
+                ),
+            ]
+        )
+        if page.source_refs:
+            ref = page.source_refs[0]
+            lines.append(
+                "   source: {} ({}; support: {})".format(
+                    ref.source_id,
+                    ref.locator or "locator:unknown",
+                    ref.support or "unknown",
+                )
+            )
+        if page.corrections:
+            lines.append("   corrections: {}".format(", ".join(page.corrections)))
+        if page.superseded_by:
+            lines.append("   superseded_by: {}".format(", ".join(page.superseded_by)))
+    return "\n".join(lines)
+
+
+def _no_memory_match_response(query: str) -> str:
+    return "I do not have matching user-memory pages for `{}`.".format(query or "memory")
+
+
+def _apply_memory_correction(
+    root: Path,
+    page: UserMemoryPage,
+    replacement: str,
+    task: TelegramTask,
+) -> str:
+    replacement_claim = _normalize_replacement_claim(replacement)
+    sensitivity = _max_sensitivity(page.sensitivity, _content_sensitivity(replacement_claim))
+    source = _memory_control_source_record(task, "correction", sensitivity)
+    _write_memory_control_source_record(root, source, "memory correction command")
+    correction_path = _write_memory_correction_page(root, page, replacement_claim, source, sensitivity)
+    _write_corrected_memory_page(root, page, replacement_claim, correction_path, source, sensitivity)
+    _rebuild_index(root, _owner_user_for_root(root))
+    _append_memory_control_log(
+        root,
+        "correction",
+        source.source_id,
+        (page.relative_path, correction_path),
+        "updated active claim and linked correction record",
+    )
+    return (
+        "Updated {}. The active claim now reads: {} Correction record: {}.".format(
+            page.title,
+            replacement_claim,
+            correction_path,
+        )
+    )
+
+
+def _apply_memory_forget(
+    root: Path,
+    pages: Sequence[UserMemoryPage],
+    task: TelegramTask,
+) -> str:
+    sensitivity = MemorySensitivity.PRIVATE.value
+    for page in pages:
+        sensitivity = _max_sensitivity(sensitivity, page.sensitivity)
+    source = _memory_control_source_record(task, "deletion", sensitivity)
+    _write_memory_control_source_record(root, source, "memory deletion command")
+    changed = []
+    for page in pages:
+        _write_deleted_memory_page(root, page, source)
+        changed.append(page.relative_path)
+    _redact_deleted_source_refs(root, pages, source)
+    _rebuild_index(root, _owner_user_for_root(root))
+    _append_memory_control_log(
+        root,
+        "forget",
+        source.source_id,
+        tuple(changed),
+        "deleted synthesized memory and redacted source refs according to retention policy",
+    )
+    titles = ", ".join(page.title for page in pages)
+    return (
+        "Forgot {} memory page(s): {}. Deleted pages are tombstoned and excluded from future retrieval.".format(
+            len(pages),
+            titles,
+        )
+    )
+
+
+def _apply_memory_sensitivity_mark(
+    root: Path,
+    page: UserMemoryPage,
+    sensitivity: str,
+    task: TelegramTask,
+) -> str:
+    source = _memory_control_source_record(task, "sensitivity", sensitivity)
+    _write_memory_control_source_record(root, source, "memory sensitivity command")
+    page_path = root / page.relative_path
+    existing = page_path.read_text(encoding="utf-8")
+    state = _enum_or_none(MemoryState, page.memory_state) or MemoryState.CONFIRMED
+    updated = _replace_frontmatter_scalar(existing, "sensitivity", sensitivity)
+    updated = _replace_frontmatter_scalar(
+        updated,
+        "prompt_visibility",
+        _prompt_visibility_for(page.page_type, sensitivity, state),
+    )
+    updated = _replace_frontmatter_scalar(updated, "updated_at", _format_dt(source.captured_at))
+    updated = _append_frontmatter_source_refs(
+        updated,
+        (
+            CandidateSourceRef(
+                source_id=source.source_id,
+                path=source.path,
+                locator="message:{}".format(task.message_id),
+                claim="User marked memory sensitivity.",
+                support="correction",
+                excerpt_hash="sha256:{}".format(source.sha256[:16]),
+            ),
+        ),
+    )
+    updated = updated.rstrip() + "\n\n## Sensitivity Update\n\n- Marked as `{}` by explicit user command [source: {}].\n".format(
+        sensitivity,
+        source.source_id,
+    )
+    page_path.write_text(updated, encoding="utf-8")
+    _rebuild_index(root, _owner_user_for_root(root))
+    _append_memory_control_log(
+        root,
+        "sensitivity",
+        source.source_id,
+        (page.relative_path,),
+        "marked sensitivity as {}".format(sensitivity),
+    )
+    return "Marked {} as `{}`. Prompt visibility is now `{}`.".format(
+        page.title,
+        sensitivity,
+        _prompt_visibility_for(page.page_type, sensitivity, state),
+    )
 
 
 def parse_conversation_text(text: str, channel: str = "codex") -> Tuple[ConversationMessage, ...]:
@@ -714,9 +1138,14 @@ def plan_user_memory_ingest(
         normalized_messages,
         source_record=source_record,
     )
+    confirmation_required_candidates = tuple(
+        candidate for candidate in candidates if _requires_confirmation_before_storage(candidate)
+    )
     edits: List[ProposedWikiEdit] = []
     contradictions: List[ContradictionRecord] = []
     for candidate in candidates:
+        if candidate in confirmation_required_candidates:
+            continue
         relative_path = candidate.relative_path
         page_path = options.root / relative_path
         existing = _read_text_if_exists(page_path)
@@ -753,6 +1182,7 @@ def plan_user_memory_ingest(
         owner_user=options.owner_user,
         source_record=source_record,
         candidates=candidates,
+        confirmation_required_candidates=confirmation_required_candidates,
         edits=tuple(edits),
         contradictions=tuple(contradictions),
         withheld_secret_count=withheld_secret_count,
@@ -783,6 +1213,7 @@ def apply_ingest_plan(plan: IngestPlan) -> IngestPlan:
         else:
             raise UserMemoryIngestError("unsupported edit action: {}".format(edit.action))
         changed_pages.append(edit.relative_path)
+    _update_pending_confirmations(plan)
     _update_contradictions(plan)
     _rebuild_index(plan.root, plan.owner_user)
     _append_log(plan, changed_pages)
@@ -895,6 +1326,8 @@ def _load_user_memory_page(path: Path, root: Path) -> Optional[UserMemoryPage]:
         source_refs=tuple(metadata.get("source_refs", ())),
         tags=tuple(metadata.get("tags", ())),
         related=tuple(metadata.get("related", ())),
+        supersedes=tuple(metadata.get("supersedes", ())),
+        superseded_by=tuple(metadata.get("superseded_by", ())),
         contradictions=tuple(metadata.get("contradictions", ())),
         corrections=tuple(metadata.get("corrections", ())),
         summary=summary,
@@ -920,6 +1353,8 @@ def _parse_memory_frontmatter(frontmatter: str) -> Dict[str, object]:
     source_refs: List[UserMemorySourceRef] = []
     list_values: Dict[str, List[str]] = {
         "related": [],
+        "supersedes": [],
+        "superseded_by": [],
         "contradictions": [],
         "corrections": [],
         "tags": [],
@@ -1154,6 +1589,7 @@ def _task_type_boost(page: UserMemoryPage, task_type: UserMemoryTaskType) -> flo
 def _page_is_deleted_or_unusable(page: UserMemoryPage) -> bool:
     return (
         page.status in {"deleted", "archived"}
+        or page.memory_state == MemoryState.RETRACTED.value
         or page.review_status == "deletion_pending"
         or page.prompt_visibility == "never"
     )
@@ -1194,6 +1630,7 @@ def _memory_state_rank(page: UserMemoryPage) -> int:
         MemoryState.OBSERVED_PATTERN.value: 2,
         MemoryState.INFERRED.value: 3,
         MemoryState.OPEN_QUESTION.value: 4,
+        MemoryState.RETRACTED.value: 99,
     }
     return order.get(page.memory_state, 5)
 
@@ -1499,7 +1936,7 @@ def _build_candidate(
     from_correction: bool = False,
 ) -> MemoryCandidate:
     confidence_level, confidence_score, review_status = _confidence_for_state(state)
-    sensitivity = _sensitivity_for_page_type(page_type)
+    sensitivity = _sensitivity_for_candidate(page_type, claim, message.text)
     prompt_visibility = _prompt_visibility_for(page_type, sensitivity, state)
     source_ref = CandidateSourceRef(
         source_id=source_record.source_id,
@@ -1673,6 +2110,360 @@ def _write_source_record(plan: IngestPlan) -> None:
         manifest.write(json.dumps(_source_record_json(plan.source_record), sort_keys=True) + "\n")
 
 
+def _normalize_replacement_claim(value: str) -> str:
+    claim = _trim_terminal_punctuation(_clean_sentence(value))
+    if not claim:
+        return "User corrected this memory."
+    if re.match(r"^(user|the user)\b", claim, flags=re.IGNORECASE):
+        return claim[0].upper() + claim[1:] + "."
+    return "User corrected this memory to: {}.".format(claim)
+
+
+def _memory_control_source_record(
+    task: TelegramTask,
+    source_type: str,
+    sensitivity: str,
+) -> SourceRecord:
+    captured_at = task.received_at or datetime.now(timezone.utc)
+    digest = _sha256("{}:{}:{}:{}".format(task.chat_id, task.user_id, task.message_id, task.text))
+    source_id = "src-{}-telegram-memory-{}-{}".format(
+        captured_at.astimezone(timezone.utc).strftime("%Y-%m-%d"),
+        slugify(source_type),
+        digest[:10],
+    )
+    return SourceRecord(
+        source_id=source_id,
+        path="raw/redactions/{}.json".format(source_id),
+        source_type=source_type,
+        channel="telegram",
+        captured_at=captured_at,
+        source_event_at=task.received_at,
+        sha256=digest,
+        sensitivity=sensitivity,
+        consent_scope="store",
+        retention=SourceRetention.HASH_ONLY,
+        redaction_state="redacted",
+        message_count=1,
+    )
+
+
+def _write_memory_control_source_record(root: Path, source: SourceRecord, reason: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    redaction_path = root / source.path
+    redaction_path.parent.mkdir(parents=True, exist_ok=True)
+    if not redaction_path.exists():
+        redaction_path.write_text(
+            json.dumps(
+                {
+                    "source_id": source.source_id,
+                    "sha256": source.sha256,
+                    "channel": source.channel,
+                    "message_count": source.message_count,
+                    "retention": source.retention.value,
+                    "raw_content": "not retained",
+                    "reason": reason,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    manifest_path = root / "raw" / "manifest.jsonl"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else ""
+    if '"source_id": "{}"'.format(source.source_id) not in existing:
+        with manifest_path.open("a", encoding="utf-8") as manifest:
+            manifest.write(json.dumps(_source_record_json(source), sort_keys=True) + "\n")
+
+
+def _write_memory_correction_page(
+    root: Path,
+    page: UserMemoryPage,
+    replacement_claim: str,
+    source: SourceRecord,
+    sensitivity: str,
+) -> str:
+    slug = "correction-{}-{}".format(slugify(page.title), source.sha256[:8])
+    relative_path = "wiki/corrections/{}.md".format(slug)
+    path = root / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = _format_dt(source.captured_at)
+    prompt_visibility = _prompt_visibility_for(PageType.CORRECTION, sensitivity, MemoryState.CORRECTION)
+    lines = [
+        "---",
+        "id: mem-correction-{}".format(slug),
+        "title: Correction {}".format(page.title),
+        "page_type: correction",
+        "owner_user: {}".format(_owner_user_for_root(root)),
+        "status: active",
+        "memory_state: correction",
+        "confidence:",
+        "  level: high",
+        "  score: 0.92",
+        "sensitivity: {}".format(sensitivity),
+        "prompt_visibility: {}".format(prompt_visibility),
+        "review_status: user_confirmed",
+        "created_at: {}".format(now),
+        "updated_at: {}".format(now),
+        "last_observed_at: {}".format(now),
+        "last_confirmed_at: {}".format(now),
+        "stale_after: P180D",
+        "source_refs:",
+        "  - source_id: {}".format(source.source_id),
+        "    path: {}".format(source.path),
+        "    locator: message:control",
+        "    claim: User corrected {}.".format(_yaml_scalar(page.title)),
+        "    support: correction",
+        "    excerpt_hash: sha256:{}".format(source.sha256[:16]),
+        "related:",
+        "  - {}".format(page.relative_path),
+        "supersedes:",
+        "  - {}".format(page.relative_path),
+        "superseded_by: []",
+        "contradictions: []",
+        "corrections: []",
+        "tags: [correction, memory-control]",
+        "---",
+        "",
+        "# Correction {}".format(page.title),
+        "",
+        replacement_claim,
+        "",
+        "## Corrective Rule",
+        "",
+        "Use this correction instead of older wording from `{}`.".format(page.relative_path),
+        "",
+        "## Evidence",
+        "",
+        "- Explicit Telegram memory-control command [source: {}; confidence: high].".format(
+            source.source_id
+        ),
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return relative_path
+
+
+def _write_corrected_memory_page(
+    root: Path,
+    page: UserMemoryPage,
+    replacement_claim: str,
+    correction_path: str,
+    source: SourceRecord,
+    sensitivity: str,
+) -> None:
+    path = root / page.relative_path
+    existing = path.read_text(encoding="utf-8")
+    now = _format_dt(source.captured_at)
+    state = MemoryState.CONFIRMED
+    updated = _replace_frontmatter_scalar(existing, "status", "active")
+    updated = _replace_frontmatter_scalar(updated, "memory_state", state.value)
+    updated = _replace_frontmatter_scalar(updated, "review_status", "user_confirmed")
+    updated = _replace_frontmatter_scalar(updated, "sensitivity", sensitivity)
+    updated = _replace_frontmatter_scalar(
+        updated,
+        "prompt_visibility",
+        _prompt_visibility_for(page.page_type, sensitivity, state),
+    )
+    updated = _replace_frontmatter_scalar(updated, "updated_at", now)
+    updated = _replace_frontmatter_scalar(updated, "last_confirmed_at", now)
+    updated = _append_frontmatter_list_values(updated, "corrections", (correction_path,))
+    updated = _append_frontmatter_list_values(updated, "superseded_by", (correction_path,))
+    updated = _append_frontmatter_source_refs(
+        updated,
+        (
+            CandidateSourceRef(
+                source_id=source.source_id,
+                path=source.path,
+                locator="message:control",
+                claim="User corrected {}.".format(page.title),
+                support="correction",
+                excerpt_hash="sha256:{}".format(source.sha256[:16]),
+            ),
+        ),
+    )
+    frontmatter, body = _split_frontmatter(updated)
+    remaining_sections = _body_sections_after_summary(body)
+    old_summary = page.summary or "Previous claim text was present before correction."
+    corrected_body = [
+        "# {}".format(page.title),
+        "",
+        replacement_claim,
+        "",
+        "## Superseded Claim",
+        "",
+        old_summary,
+        "",
+        "## User Correction",
+        "",
+        "- Correction record: {}".format(correction_path),
+        "- Source: {}".format(source.source_id),
+        "",
+    ]
+    if remaining_sections:
+        corrected_body.extend([remaining_sections.strip(), ""])
+    if frontmatter is None:
+        path.write_text("\n".join(corrected_body), encoding="utf-8")
+    else:
+        path.write_text("---\n{}\n---\n\n{}".format(frontmatter, "\n".join(corrected_body)), encoding="utf-8")
+
+
+def _write_deleted_memory_page(root: Path, page: UserMemoryPage, source: SourceRecord) -> None:
+    path = root / page.relative_path
+    existing = path.read_text(encoding="utf-8")
+    now = _format_dt(source.captured_at)
+    updated = _replace_frontmatter_scalar(existing, "status", "deleted")
+    updated = _replace_frontmatter_scalar(updated, "memory_state", MemoryState.RETRACTED.value)
+    updated = _replace_frontmatter_scalar(updated, "prompt_visibility", "never")
+    updated = _replace_frontmatter_scalar(updated, "review_status", "deletion_pending")
+    updated = _replace_frontmatter_scalar(updated, "updated_at", now)
+    updated = _redact_frontmatter_source_ref_claims(updated)
+    updated = _append_frontmatter_source_refs(
+        updated,
+        (
+            CandidateSourceRef(
+                source_id=source.source_id,
+                path=source.path,
+                locator="message:control",
+                claim="User requested deletion.",
+                support="correction",
+                excerpt_hash="sha256:{}".format(source.sha256[:16]),
+            ),
+        ),
+    )
+    frontmatter, _body = _split_frontmatter(updated)
+    body = "\n".join(
+        [
+            "# Deleted Memory",
+            "",
+            "This memory was deleted by explicit user request. Original claim text was removed.",
+            "",
+            "## Tombstone",
+            "",
+            "- deletion_source: {}".format(source.source_id),
+            "- deleted_at: {}".format(now),
+            "",
+        ]
+    )
+    if frontmatter is None:
+        path.write_text(body, encoding="utf-8")
+    else:
+        path.write_text("---\n{}\n---\n\n{}".format(frontmatter, body), encoding="utf-8")
+
+
+def _redact_deleted_source_refs(
+    root: Path,
+    pages: Sequence[UserMemoryPage],
+    deletion_source: SourceRecord,
+) -> None:
+    source_ids = {
+        ref.source_id
+        for page in pages
+        for ref in page.source_refs
+        if ref.source_id
+    }
+    source_paths = {
+        ref.path
+        for page in pages
+        for ref in page.source_refs
+        if ref.path
+    }
+    for relative in source_paths:
+        source_path = (root / relative).resolve()
+        try:
+            source_path.relative_to(root.resolve())
+        except ValueError:
+            continue
+        if not source_path.exists() or "raw/redactions/" in source_path.as_posix():
+            continue
+        source_path.write_text(
+            json.dumps(
+                {
+                    "deleted_at": _format_dt(deletion_source.captured_at),
+                    "deletion_source": deletion_source.source_id,
+                    "raw_content": "deleted by user request",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    manifest_path = root / "raw" / "manifest.jsonl"
+    if not manifest_path.exists() or not source_ids:
+        return
+    updated_lines = []
+    changed = False
+    for line in manifest_path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            updated_lines.append(line)
+            continue
+        if isinstance(record, dict) and record.get("source_id") in source_ids:
+            record["consent_scope"] = "delete_requested"
+            record["redaction_state"] = "pending_delete"
+            record["notes"] = "source referenced deleted memory; deletion source {}".format(
+                deletion_source.source_id
+            )
+            changed = True
+            updated_lines.append(json.dumps(record, sort_keys=True))
+        else:
+            updated_lines.append(line)
+    if changed:
+        manifest_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+
+
+def _append_memory_control_log(
+    root: Path,
+    action: str,
+    source_id: str,
+    paths: Sequence[str],
+    note: str,
+) -> None:
+    path = root / "log.md"
+    existing = path.read_text(encoding="utf-8") if path.exists() else "# User Memory Log\n"
+    entry = "- {}: memory-control {} {} touched {}; {}.".format(
+        _format_dt(datetime.now(timezone.utc)),
+        action,
+        source_id,
+        ", ".join(paths) if paths else "none",
+        note,
+    )
+    path.write_text(existing.rstrip() + "\n" + entry + "\n", encoding="utf-8")
+
+
+def _format_recent_memory_updates(root: Path, limit: int = 5) -> str:
+    path = root / "log.md"
+    if not path.exists():
+        return "No memory update log exists yet."
+    entries = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("- ")
+    ]
+    if not entries:
+        return "No memory update entries exist yet."
+    lines = ["Recent memory updates:"]
+    lines.extend(entries[-limit:])
+    return "\n".join(lines)
+
+
+def _owner_user_for_root(root: Path) -> str:
+    index_path = root / "index.md"
+    if index_path.exists():
+        match = re.search(r"^Owner user:\s*(.+)$", index_path.read_text(encoding="utf-8"), flags=re.MULTILINE)
+        if match:
+            return match.group(1).strip()
+    for page_path in sorted((root / "wiki").glob("*/*.md")):
+        metadata = _page_metadata(page_path)
+        owner = metadata.get("owner_user")
+        if owner:
+            return owner
+    return "unknown"
+
+
 def _source_record_json(record: SourceRecord) -> Mapping[str, Any]:
     return {
         "source_id": record.source_id,
@@ -1828,7 +2619,7 @@ def _append_frontmatter_source_refs(
             insert_at = index + 1
             while insert_at < len(lines):
                 current = lines[insert_at]
-                if current and not current.startswith(" ") and current != "---":
+                if current == "---" or (current and not current.startswith(" ")):
                     break
                 insert_at += 1
             break
@@ -1839,6 +2630,79 @@ def _append_frontmatter_source_refs(
     for yaml_line in reversed(_source_ref_yaml(refs)):
         lines.insert(insert_at, yaml_line)
     return "\n".join(lines) + rest
+
+
+def _append_frontmatter_list_values(
+    content: str,
+    key: str,
+    values: Sequence[str],
+) -> str:
+    additions = tuple(value for value in values if value)
+    if not additions or not content.startswith("---\n"):
+        return content
+    end = content.find("\n---", 4)
+    if end == -1:
+        return content
+    frontmatter = content[: end + 4]
+    rest = content[end + 4 :]
+    parsed = _parse_memory_frontmatter(frontmatter[4:-4])
+    existing_values = tuple(parsed.get(key, ()))
+    missing = tuple(value for value in additions if value not in existing_values)
+    if not missing:
+        return content
+    lines = frontmatter.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.startswith("{}:".format(key)):
+            start = index
+            break
+    if start is None:
+        insert_at = len(lines) - 1
+        lines.insert(insert_at, "{}:".format(key))
+        for value in reversed(missing):
+            lines.insert(insert_at + 1, "  - {}".format(value))
+        return "\n".join(lines) + rest
+    if lines[start].strip() == "{}: []".format(key):
+        lines[start] = "{}:".format(key)
+        insert_at = start + 1
+    else:
+        insert_at = start + 1
+        while insert_at < len(lines):
+            current = lines[insert_at]
+            if current == "---" or (current and not current.startswith(" ")):
+                break
+            insert_at += 1
+    for value in reversed(missing):
+        lines.insert(insert_at, "  - {}".format(value))
+    return "\n".join(lines) + rest
+
+
+def _redact_frontmatter_source_ref_claims(content: str) -> str:
+    if not content.startswith("---\n"):
+        return content
+    end = content.find("\n---", 4)
+    if end == -1:
+        return content
+    frontmatter = content[:end]
+    rest = content[end:]
+    return re.sub(
+        r"^    claim: .*$",
+        "    claim: deleted by user request",
+        frontmatter,
+        flags=re.MULTILINE,
+    ) + rest
+
+
+def _body_sections_after_summary(body: str) -> str:
+    lines = body.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.startswith("## "):
+            start = index
+            break
+    if start is None:
+        return ""
+    return "\n".join(lines[start:])
 
 
 def _replace_frontmatter_scalar(content: str, key: str, value: str) -> str:
@@ -1892,6 +2756,35 @@ def _yaml_scalar(value: str) -> str:
     if ":" in value or "#" in value or value.startswith("{"):
         return json.dumps(value)
     return value
+
+
+def _update_pending_confirmations(plan: IngestPlan) -> None:
+    if not plan.confirmation_required_candidates:
+        return
+    path = plan.root / "review" / "pending.md"
+    existing = path.read_text(encoding="utf-8") if path.exists() else "# Pending Memory Confirmation\n"
+    additions: List[str] = []
+    for candidate in plan.confirmation_required_candidates:
+        marker = "{} {}".format(plan.source_record.source_id, candidate.stable_id)
+        if marker in existing:
+            continue
+        additions.extend(
+            [
+                "",
+                "## {} - Confirmation Required".format(_format_dt(plan.source_record.captured_at)),
+                "",
+                "- marker: {}".format(marker),
+                "- candidate_id: {}".format(candidate.stable_id),
+                "- page_type: {}".format(candidate.page_type.value),
+                "- sensitivity: {}".format(candidate.sensitivity),
+                "- memory_state: {}".format(candidate.memory_state.value),
+                "- source: {}".format(plan.source_record.source_id),
+                "- action: high-sensitivity inferred claim withheld pending explicit user confirmation.",
+            ]
+        )
+    if additions:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(existing.rstrip() + "\n" + "\n".join(additions) + "\n", encoding="utf-8")
 
 
 def _update_contradictions(plan: IngestPlan) -> None:
@@ -1986,7 +2879,7 @@ def _append_log(plan: IngestPlan, changed_pages: Sequence[str]) -> None:
     contradictions = ", ".join(item.path for item in plan.contradictions) if plan.contradictions else "none"
     entry = (
         "- {}: ingest {} from {} touched {}; candidates: {}; contradictions: {}; "
-        "retention: {}; withheld_secret_candidates: {}."
+        "confirmation_required: {}; retention: {}; withheld_secret_candidates: {}."
     ).format(
         _format_dt(plan.source_record.captured_at),
         plan.source_record.source_id,
@@ -1994,6 +2887,7 @@ def _append_log(plan: IngestPlan, changed_pages: Sequence[str]) -> None:
         touched,
         len(plan.candidates),
         contradictions,
+        len(plan.confirmation_required_candidates),
         plan.source_record.retention.value,
         plan.withheld_secret_count,
     )
@@ -2054,19 +2948,53 @@ def _confidence_for_state(state: MemoryState) -> Tuple[str, float, str]:
         return "low", 0.45, "needs_user_review"
     if state == MemoryState.OPEN_QUESTION:
         return "low", 0.20, "needs_user_review"
+    if state == MemoryState.RETRACTED:
+        return "low", 0.0, "deletion_pending"
     return "low", 0.30, "needs_user_review"
 
 
 def _sensitivity_for_page_type(page_type: PageType) -> str:
     if page_type in {PageType.CONCEPT}:
-        return "internal"
+        return MemorySensitivity.INTERNAL.value
     if page_type in {PageType.PROJECT, PageType.DECISION, PageType.OPEN_QUESTION}:
-        return "internal"
+        return MemorySensitivity.INTERNAL.value
     if page_type in {PageType.PERSON, PageType.ORG, PageType.VALUE, PageType.PREFERENCE}:
-        return "private"
+        return MemorySensitivity.PRIVATE.value
     if page_type == PageType.CORRECTION:
-        return "private"
-    return "private"
+        return MemorySensitivity.PRIVATE.value
+    return MemorySensitivity.PRIVATE.value
+
+
+def _sensitivity_for_candidate(page_type: PageType, claim: str, source_text: str) -> str:
+    base = _sensitivity_for_page_type(page_type)
+    content = _content_sensitivity("{} {}".format(claim, source_text))
+    return _max_sensitivity(base, content)
+
+
+def _content_sensitivity(text: str) -> str:
+    if SECRET_RE.search(text):
+        return MemorySensitivity.SECRET.value
+    if RESTRICTED_RE.search(text):
+        return MemorySensitivity.RESTRICTED.value
+    return MemorySensitivity.PRIVATE.value
+
+
+def _max_sensitivity(first: str, second: str) -> str:
+    order = {
+        MemorySensitivity.PUBLIC.value: 0,
+        MemorySensitivity.INTERNAL.value: 1,
+        MemorySensitivity.PRIVATE.value: 2,
+        MemorySensitivity.RESTRICTED.value: 3,
+        MemorySensitivity.SECRET.value: 4,
+    }
+    return first if order.get(first, 0) >= order.get(second, 0) else second
+
+
+def _requires_confirmation_before_storage(candidate: MemoryCandidate) -> bool:
+    return (
+        candidate.memory_state == MemoryState.INFERRED
+        and candidate.sensitivity in {MemorySensitivity.RESTRICTED.value, MemorySensitivity.SECRET.value}
+    )
 
 
 def _prompt_visibility_for(
@@ -2074,11 +3002,15 @@ def _prompt_visibility_for(
     sensitivity: str,
     state: MemoryState,
 ) -> str:
+    if sensitivity == MemorySensitivity.SECRET.value:
+        return "never"
+    if sensitivity == MemorySensitivity.RESTRICTED.value:
+        return "confirm_first"
     if state == MemoryState.OPEN_QUESTION:
         return "confirm_first"
     if state == MemoryState.INFERRED:
-        return "confirm_first" if sensitivity in {"private", "restricted"} else "task_only"
-    if page_type == PageType.CONCEPT and sensitivity == "public":
+        return "confirm_first" if sensitivity in {MemorySensitivity.PRIVATE.value, MemorySensitivity.RESTRICTED.value} else "task_only"
+    if page_type == PageType.CONCEPT and sensitivity == MemorySensitivity.PUBLIC.value:
         return "safe"
     if page_type == PageType.CORRECTION:
         return "task_only"
@@ -2098,8 +3030,11 @@ def _stale_after(page_type: PageType, state: MemoryState) -> str:
 def _source_sensitivity(messages: Sequence[ConversationMessage]) -> str:
     for message in messages:
         if SECRET_RE.search(message.text):
-            return "secret"
-    return "private"
+            return MemorySensitivity.SECRET.value
+    for message in messages:
+        if RESTRICTED_RE.search(message.text):
+            return MemorySensitivity.RESTRICTED.value
+    return MemorySensitivity.PRIVATE.value
 
 
 def _source_path(source_id: str, channel: str, retention: SourceRetention) -> str:

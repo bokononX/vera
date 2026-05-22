@@ -1,5 +1,9 @@
 # Change log
 
+- 2026-05-21: Updated the Herald user memory concept with implemented Telegram
+  memory controls, correction/forget/sensitivity behavior, default exclusion of
+  private memory from ordinary Codex prompts, and confirmation gating for
+  high-sensitivity inferred memory.
 - 2026-05-21: Updated the Herald user memory concept with prompt retrieval
   integration: bounded task relevance, privacy gates, provenance/confidence
   prompt packets, caveats for unresolved memory, confirmation constraints, and
