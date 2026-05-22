@@ -59,6 +59,10 @@
       "do not treat owner messages as approval for unsafe, irreversible, or authority-sensitive actions"
     ]
   },
+  "imessage": {
+    "contact_ingestion_enabled": false,
+    "chat_db_path": "~/Library/Messages/chat.db"
+  },
   "heartbeat": {
     "enabled": false,
     "dry_run": true,

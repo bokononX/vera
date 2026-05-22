@@ -43,6 +43,11 @@ runtime execution explicit:
   same non-secret local config, keyed by stable Telegram `user_id` with display
   labels, values, priorities, communication style, escalation boundaries, and
   an optional refreshable local/wiki profile file.
+- **iMessage contact metadata ingest:** optionally reads local macOS Messages
+  contact metadata in read-only mode to discover people the owner texts with.
+  The path is disabled by default, requires explicit local configuration and
+  macOS Full Disk Access, and records only contact/handle candidates for later
+  owner clarification.
 - **Policy prompt:** starts from the active assistant identity so the Telegram
   assistant introduces and conducts itself as Vera or the configured local
   name, not as Codex. It then encodes Herald's role as a faithful
@@ -131,6 +136,12 @@ runtime execution explicit:
   approval, sandbox, and escalation posture.
 - Telegram transport details should stay isolated from Codex and workspace
   planning.
+- iMessage contact ingest must stay metadata-only: it may read local Messages
+  handle/chat identity tables in read-only mode, but must not read, log,
+  summarize, embed, persist, or send message bodies.
+- Discovered iMessage contacts are unresolved people candidates, not
+  relationship facts. Vera must ask the owner who the person is before using
+  the candidate as durable social context.
 - The harness should collect and persist only the task or chat-session metadata
   needed for restart/recovery.
 - Default local runtime state, event logs, Telegram config/state, identity

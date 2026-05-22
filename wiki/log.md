@@ -1,6 +1,10 @@
 # Change log
 
 - 2026-05-22: Updated the Vera harness and Herald user memory concepts with
+  disabled-by-default, read-only iMessage contact metadata ingest and the
+  boundary that discovered handles remain owner-review open questions until
+  explicitly clarified.
+- 2026-05-22: Updated the Vera harness and Herald user memory concepts with
   the durable owner-question queue, proactive selection lifecycle, dedupe
   boundary, and explicit owner-answer provenance into user memory.
 - 2026-05-22: Updated the Vera harness concept with opt-in proactive
