@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -92,21 +93,24 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_api_base_url, "https://api.telegram.org")
         self.assertEqual(config.telegram_poll_timeout_seconds, 30)
         self.assertEqual(config.telegram_request_timeout_seconds, 35)
-        self.assertEqual(config.telegram_state_path.name, "telegram_state.json")
+        runtime_root = Path("runtime").resolve()
+        self.assertEqual(config.telegram_state_path, runtime_root / "telegram_state.json")
         self.assertIsNone(config.telegram_unauthorized_response)
         self.assertEqual(config.assistant_identity.safe_display_name, "Vera")
         self.assertIn("personal assistant", config.assistant_identity.short_description)
-        self.assertEqual(config.assistant_identity_path.name, "assistant_identity.json")
+        self.assertEqual(config.assistant_identity_path, runtime_root / "assistant_identity.json")
         self.assertEqual(
-            config.assistant_identity_interview_state_path.name,
-            "assistant_identity_interviews.json",
+            config.assistant_identity_interview_state_path,
+            runtime_root / "assistant_identity_interviews.json",
         )
         self.assertIsNone(config.owner_profile)
-        self.assertEqual(config.run_state_path.name, "run_state.json")
-        self.assertEqual(config.chat_session_state_path.name, "chat_sessions.json")
-        self.assertEqual(config.identity_profile_path.name, "identity_profile.json")
-        self.assertEqual(config.identity_interview_state_path.name, "identity_interviews.json")
+        self.assertEqual(config.run_state_path, runtime_root / "run_state.json")
+        self.assertEqual(config.chat_session_state_path, runtime_root / "chat_sessions.json")
+        self.assertEqual(config.identity_profile_path, runtime_root / "identity_profile.json")
+        self.assertEqual(config.identity_interview_state_path, runtime_root / "identity_interviews.json")
         self.assertIsNone(config.user_memory_root)
+        self.assertEqual(config.event_log_path, runtime_root / "events.jsonl")
+        self.assertEqual(config.workspace_root, runtime_root / "workspaces")
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server"))
         self.assertEqual(config.max_retries, 1)
         self.assertEqual(config.workspace_bootstrap_timeout_seconds, 300)
@@ -124,6 +128,35 @@ class HarnessConfigTests(unittest.TestCase):
                 {"VERA_TELEGRAM_BOT_TOKEN": "token-placeholder"},
                 require_secrets=True,
             )
+
+    def test_load_uses_runtime_default_telegram_config_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir, "runtime")
+            runtime_dir.mkdir()
+            config_path = runtime_dir / "telegram_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "telegram": {
+                            "allowed_chat_ids": [321],
+                            "state_path": "./runtime/telegram_state.json",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(temp_dir)
+                config = HarnessConfig.load(
+                    {"VERA_TELEGRAM_BOT_TOKEN": "token-placeholder"},
+                    require_secrets=True,
+                )
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(config.allowed_chat_ids, (321,))
+        self.assertEqual(config.telegram_state_path, (runtime_dir / "telegram_state.json").resolve())
 
     def test_load_reads_telegram_settings_from_config_and_token_from_env(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1,5 +1,7 @@
 # Change log
 
+- 2026-05-22: Updated the Vera harness concept with the `./runtime` default
+  local runtime directory and explicit legacy `./.vera` migration boundary.
 - 2026-05-21: Updated the Herald user memory concept with implemented Telegram
   memory controls, correction/forget/sensitivity behavior, default exclusion of
   private memory from ordinary Codex prompts, and confirmation gating for

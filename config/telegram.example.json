@@ -5,11 +5,11 @@
     "api_base_url": "https://api.telegram.org",
     "poll_timeout_seconds": 30,
     "request_timeout_seconds": 35,
-    "state_path": "./.vera/telegram_state.json",
+    "state_path": "./runtime/telegram_state.json",
     "unauthorized_response": null
   },
   "assistant": {
-    "identity_path": "./.vera/assistant_identity.json",
+    "identity_path": "./runtime/assistant_identity.json",
     "name": "Vera",
     "short_description": "a personal assistant/minime for memory, thoughtful conversation, coordination, and clear thinking",
     "mission": "Help the owner think clearly, remember durable context, coordinate carefully, and turn intentions into reversible, well-governed action.",

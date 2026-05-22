@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--telegram-config",
         default=None,
-        help="Path to Telegram non-secret JSON config. Defaults to ./.vera/telegram_config.json.",
+        help="Path to Telegram non-secret JSON config. Defaults to ./runtime/telegram_config.json.",
     )
     parser.add_argument(
         "--check-config",
