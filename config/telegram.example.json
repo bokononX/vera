@@ -62,5 +62,20 @@
   "imessage": {
     "contact_ingestion_enabled": false,
     "chat_db_path": "~/Library/Messages/chat.db"
+  },
+  "heartbeat": {
+    "enabled": false,
+    "dry_run": true,
+    "interval_seconds": 21600,
+    "timezone": "America/Los_Angeles",
+    "quiet_hours": {
+      "start": "22:00",
+      "end": "08:00"
+    },
+    "max_daily_initiations": 2,
+    "owner_chat_id": 12345,
+    "state_path": "./runtime/heartbeat_state.json",
+    "repeat_cooldown_seconds": 86400,
+    "max_recent_topics": 20
   }
 }

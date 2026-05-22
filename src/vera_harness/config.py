@@ -6,9 +6,10 @@ import json
 import os
 import shlex
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .assistant_identity import (
     AssistantIdentityConfigError,
@@ -38,6 +39,7 @@ DEFAULT_CHAT_SESSION_STATE_PATH = "{}/chat_sessions.json".format(DEFAULT_RUNTIME
 DEFAULT_IDENTITY_PROFILE_PATH = "{}/identity_profile.json".format(DEFAULT_RUNTIME_DIR)
 DEFAULT_IDENTITY_INTERVIEW_STATE_PATH = "{}/identity_interviews.json".format(DEFAULT_RUNTIME_DIR)
 DEFAULT_EVENT_LOG_PATH = "{}/events.jsonl".format(DEFAULT_RUNTIME_DIR)
+DEFAULT_HEARTBEAT_STATE_PATH = "{}/heartbeat_state.json".format(DEFAULT_RUNTIME_DIR)
 DEFAULT_WORKSPACE_ROOT = "{}/workspaces".format(DEFAULT_RUNTIME_DIR)
 DEFAULT_IMESSAGE_CHAT_DB_PATH = "~/Library/Messages/chat.db"
 
@@ -90,6 +92,25 @@ class CommandResolution:
 
 
 @dataclass(frozen=True)
+class HeartbeatConfig:
+    """Opt-in configuration for proactive Vera heartbeat ticks."""
+
+    enabled: bool = False
+    dry_run: bool = True
+    interval_seconds: int = 6 * 60 * 60
+    timezone: str = "UTC"
+    quiet_hours_start: Optional[str] = "22:00"
+    quiet_hours_end: Optional[str] = "08:00"
+    max_daily_initiations: int = 2
+    owner_chat_id: Optional[int] = None
+    state_path: Path = field(
+        default_factory=lambda: Path(DEFAULT_HEARTBEAT_STATE_PATH).expanduser().resolve()
+    )
+    repeat_cooldown_seconds: int = 24 * 60 * 60
+    max_recent_topics: int = 20
+
+
+@dataclass(frozen=True)
 class HarnessConfig:
     """Runtime configuration for Telegram intake, workspaces, and Codex."""
 
@@ -130,6 +151,7 @@ class HarnessConfig:
     codex_auto_input_response: Optional[str] = None
     repo_clone_command: Optional[CommandSpec] = None
     repo_bootstrap_command: Optional[CommandSpec] = None
+    heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
 
     @classmethod
     def load(
@@ -147,6 +169,7 @@ class HarnessConfig:
         owner_config = _owner_config_from_local(local_config)
         assistant_config = _assistant_config_from_local(local_config)
         imessage_config = _imessage_config_from_local(local_config)
+        heartbeat_config = _heartbeat_config_from_local(local_config)
         return cls.from_env(
             source,
             require_secrets=require_secrets,
@@ -154,6 +177,7 @@ class HarnessConfig:
             owner_config=owner_config,
             assistant_config=assistant_config,
             imessage_config=imessage_config,
+            heartbeat_config=heartbeat_config,
         )
 
     @classmethod
@@ -165,6 +189,7 @@ class HarnessConfig:
         owner_config: Optional[Mapping[str, Any]] = None,
         assistant_config: Optional[Mapping[str, Any]] = None,
         imessage_config: Optional[Mapping[str, Any]] = None,
+        heartbeat_config: Optional[Mapping[str, Any]] = None,
     ) -> "HarnessConfig":
         source = os.environ if env is None else env
         telegram_source = telegram_config or {}
@@ -189,6 +214,7 @@ class HarnessConfig:
             assistant_identity_path,
         )
         owner_profile = _parse_owner_profile(owner_config)
+        heartbeat = _parse_heartbeat_config(heartbeat_config, source)
         telegram_bot_token = _optional_text(source.get("VERA_TELEGRAM_BOT_TOKEN"))
         allowed_chat_ids = _parse_int_list(
             _setting_value(
@@ -248,6 +274,14 @@ class HarnessConfig:
             ),
             "telegram.unauthorized_response",
         )
+        if (
+            heartbeat.owner_chat_id is not None
+            and allowed_chat_ids
+            and heartbeat.owner_chat_id not in allowed_chat_ids
+        ):
+            raise ConfigError(
+                "heartbeat.owner_chat_id must be included in telegram.allowed_chat_ids"
+            )
         run_state_path = Path(
             source.get("VERA_RUN_STATE_PATH", DEFAULT_RUN_STATE_PATH)
         ).expanduser().resolve()
@@ -406,6 +440,7 @@ class HarnessConfig:
                 source.get("VERA_REPO_BOOTSTRAP_COMMAND"),
                 "VERA_REPO_BOOTSTRAP_COMMAND",
             ),
+            heartbeat=heartbeat,
         )
 
 
@@ -638,6 +673,7 @@ def _imessage_config_from_local(local_config: Mapping[str, Any]) -> Optional[Map
     imessage_config = local_config["imessage"]
     if not isinstance(imessage_config, dict):
         raise ConfigError("imessage must be a JSON object")
+
     forbidden = {
         "api_key",
         "bot_token",
@@ -662,6 +698,60 @@ def _imessage_config_from_local(local_config: Mapping[str, Any]) -> Optional[Map
     if unknown:
         raise ConfigError("iMessage config contains unknown fields: {}".format(", ".join(unknown)))
     return imessage_config
+
+
+def _heartbeat_config_from_local(local_config: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    if not local_config or "heartbeat" not in local_config:
+        return None
+    heartbeat_config = local_config["heartbeat"]
+    if not isinstance(heartbeat_config, dict):
+        raise ConfigError("heartbeat must be a JSON object")
+
+    forbidden = {
+        "api_key",
+        "bot_token",
+        "password",
+        "secret",
+        "telegram_bot_token",
+        "token",
+        "VERA_TELEGRAM_BOT_TOKEN",
+    }
+    present_forbidden = sorted(forbidden.intersection(heartbeat_config.keys()))
+    if present_forbidden:
+        raise ConfigError(
+            "Heartbeat config must not contain secret fields: {}".format(
+                ", ".join(present_forbidden)
+            )
+        )
+    allowed = {
+        "enabled",
+        "dry_run",
+        "interval_seconds",
+        "timezone",
+        "quiet_hours",
+        "quiet_hours_start",
+        "quiet_hours_end",
+        "max_daily_initiations",
+        "owner_chat_id",
+        "state_path",
+        "repeat_cooldown_seconds",
+        "max_recent_topics",
+    }
+    unknown = sorted(set(heartbeat_config.keys()) - allowed)
+    if unknown:
+        raise ConfigError("Heartbeat config contains unknown fields: {}".format(", ".join(unknown)))
+    quiet_hours = heartbeat_config.get("quiet_hours")
+    if quiet_hours is not None:
+        if not isinstance(quiet_hours, dict):
+            raise ConfigError("heartbeat.quiet_hours must be a JSON object")
+        unknown_quiet = sorted(set(quiet_hours.keys()) - {"start", "end"})
+        if unknown_quiet:
+            raise ConfigError(
+                "heartbeat.quiet_hours contains unknown fields: {}".format(
+                    ", ".join(unknown_quiet)
+                )
+            )
+    return heartbeat_config
 
 
 def _parse_assistant_identity(
@@ -758,6 +848,107 @@ def _load_owner_profile_excerpt(path: Optional[Path], max_chars: int = 2000) -> 
     return "{}\n[truncated to {} characters]".format(text[:max_chars].rstrip(), max_chars)
 
 
+def _parse_heartbeat_config(
+    heartbeat_config: Optional[Mapping[str, Any]],
+    source: Mapping[str, str],
+) -> HeartbeatConfig:
+    config = heartbeat_config or {}
+    quiet_hours = config.get("quiet_hours")
+    quiet_start_default = None
+    quiet_end_default = None
+    if isinstance(quiet_hours, Mapping):
+        quiet_start_default = quiet_hours.get("start")
+        quiet_end_default = quiet_hours.get("end")
+    quiet_hours_start = _parse_optional_time(
+        _setting_value(
+            config,
+            "quiet_hours_start",
+            source.get("VERA_HEARTBEAT_QUIET_HOURS_START", quiet_start_default or "22:00"),
+        ),
+        "heartbeat.quiet_hours_start",
+    )
+    quiet_hours_end = _parse_optional_time(
+        _setting_value(
+            config,
+            "quiet_hours_end",
+            source.get("VERA_HEARTBEAT_QUIET_HOURS_END", quiet_end_default or "08:00"),
+        ),
+        "heartbeat.quiet_hours_end",
+    )
+    if (quiet_hours_start is None) != (quiet_hours_end is None):
+        raise ConfigError("heartbeat quiet hours require both start and end")
+    if quiet_hours_start is not None and quiet_hours_start == quiet_hours_end:
+        raise ConfigError("heartbeat quiet hours start and end must differ")
+
+    timezone = _parse_timezone(
+        _setting_value(config, "timezone", source.get("VERA_HEARTBEAT_TIMEZONE", "UTC")),
+        "heartbeat.timezone",
+    )
+    return HeartbeatConfig(
+        enabled=_parse_bool(
+            _setting_value(config, "enabled", source.get("VERA_HEARTBEAT_ENABLED")),
+            "heartbeat.enabled",
+            False,
+        ),
+        dry_run=_parse_bool(
+            _setting_value(config, "dry_run", source.get("VERA_HEARTBEAT_DRY_RUN")),
+            "heartbeat.dry_run",
+            True,
+        ),
+        interval_seconds=_parse_positive_int(
+            _setting_value(
+                config,
+                "interval_seconds",
+                source.get("VERA_HEARTBEAT_INTERVAL_SECONDS"),
+            ),
+            "heartbeat.interval_seconds",
+            6 * 60 * 60,
+        ),
+        timezone=timezone,
+        quiet_hours_start=quiet_hours_start,
+        quiet_hours_end=quiet_hours_end,
+        max_daily_initiations=_parse_nonnegative_int_value(
+            _setting_value(
+                config,
+                "max_daily_initiations",
+                source.get("VERA_HEARTBEAT_MAX_DAILY_INITIATIONS"),
+            ),
+            "heartbeat.max_daily_initiations",
+            2,
+        ),
+        owner_chat_id=_parse_optional_int(
+            _setting_value(config, "owner_chat_id", source.get("VERA_HEARTBEAT_OWNER_CHAT_ID")),
+            "heartbeat.owner_chat_id",
+        ),
+        state_path=_parse_path(
+            _setting_value(
+                config,
+                "state_path",
+                source.get("VERA_HEARTBEAT_STATE_PATH", DEFAULT_HEARTBEAT_STATE_PATH),
+            ),
+            "heartbeat.state_path",
+        ),
+        repeat_cooldown_seconds=_parse_positive_int(
+            _setting_value(
+                config,
+                "repeat_cooldown_seconds",
+                source.get("VERA_HEARTBEAT_REPEAT_COOLDOWN_SECONDS"),
+            ),
+            "heartbeat.repeat_cooldown_seconds",
+            24 * 60 * 60,
+        ),
+        max_recent_topics=_parse_positive_int(
+            _setting_value(
+                config,
+                "max_recent_topics",
+                source.get("VERA_HEARTBEAT_MAX_RECENT_TOPICS"),
+            ),
+            "heartbeat.max_recent_topics",
+            20,
+        ),
+    )
+
+
 def _setting_value(
     config: Mapping[str, Any],
     key: str,
@@ -802,6 +993,70 @@ def _parse_url_base(value: Any, field_name: str) -> str:
     if not (text.startswith("https://") or text.startswith("http://")):
         raise ConfigError("{} must start with http:// or https://".format(field_name))
     return text
+
+
+def _parse_bool(value: Any, field_name: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        raise ConfigError("{} must be a boolean".format(field_name))
+    text = value.strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError("{} must be a boolean".format(field_name))
+
+
+def _parse_timezone(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError("{} must be a string".format(field_name))
+    text = value.strip()
+    if not text:
+        raise ConfigError("{} must not be empty".format(field_name))
+    try:
+        ZoneInfo(text)
+    except ZoneInfoNotFoundError:
+        raise ConfigError("{} must be a valid IANA timezone".format(field_name))
+    return text
+
+
+def _parse_optional_time(value: Any, field_name: str) -> Optional[str]:
+    if value is not None and not isinstance(value, str):
+        raise ConfigError("{} must be a string or null".format(field_name))
+    text = _optional_text(value)
+    if text is None:
+        return None
+    parts = text.split(":")
+    if len(parts) != 2:
+        raise ConfigError("{} must use HH:MM format".format(field_name))
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        raise ConfigError("{} must use HH:MM format".format(field_name))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ConfigError("{} must use HH:MM with a 00:00-23:59 time".format(field_name))
+    return "{:02d}:{:02d}".format(hour, minute)
+
+
+def _parse_optional_int(value: Any, field_name: str) -> Optional[int]:
+    if isinstance(value, bool):
+        raise ConfigError("{} must be an integer".format(field_name))
+    if isinstance(value, int):
+        return value
+    if value is not None and not isinstance(value, str):
+        raise ConfigError("{} must be an integer".format(field_name))
+    text = _optional_text(value)
+    if text is None:
+        return None
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError):
+        raise ConfigError("{} must be an integer".format(field_name))
+    return parsed
 
 
 def _parse_path(value: Any, field_name: str) -> Path:
@@ -878,3 +1133,15 @@ def _parse_nonnegative_int(value: Optional[str], field_name: str, default: int) 
     if parsed < 0:
         raise ConfigError("{} must be zero or greater".format(field_name))
     return parsed
+
+
+def _parse_nonnegative_int_value(value: Any, field_name: str, default: int) -> int:
+    if isinstance(value, bool):
+        raise ConfigError("{} must be an integer".format(field_name))
+    if isinstance(value, int):
+        if value < 0:
+            raise ConfigError("{} must be zero or greater".format(field_name))
+        return value
+    if value is not None and not isinstance(value, str):
+        raise ConfigError("{} must be an integer".format(field_name))
+    return _parse_nonnegative_int(value, field_name, default)

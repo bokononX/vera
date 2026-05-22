@@ -16,6 +16,7 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 from .chat import ChatSessionStateError
 from .codex import CodexAppServerError
 from .config import CommandResolution, ConfigError, HarnessConfig
+from .heartbeat import format_heartbeat_tick, heartbeat_event_details
 from .imessage_contacts import IMessageContactIngestionError, ingest_imessage_contacts
 from .models import TelegramTask
 from .orchestrator import (
@@ -59,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--monitor",
         action="store_true",
         help="Continuously poll Telegram, run accepted tasks through Codex, and send status replies.",
+    )
+    parser.add_argument(
+        "--heartbeat-once",
+        action="store_true",
+        help="Run one configured heartbeat tick and exit.",
     )
     parser.add_argument(
         "--fake-smoke",
@@ -241,6 +247,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.poll_once,
         args.check_config,
         args.monitor,
+        args.heartbeat_once,
         args.fake_smoke,
         args.live_smoke,
         args.console_tui,
@@ -251,11 +258,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ]
     if sum(1 for selected in selected_modes if selected) > 1:
         parser.error(
-            "choose only one mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, --lint-user-memory, --ingest-imessage-contacts, or --check-config"
+            "choose only one mode: --dry-run, --poll-once, --monitor, --heartbeat-once, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, --lint-user-memory, --ingest-imessage-contacts, or --check-config"
         )
     if not any(selected_modes):
         parser.error(
-            "choose a mode: --dry-run, --poll-once, --monitor, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, --lint-user-memory, --ingest-imessage-contacts, or --check-config"
+            "choose a mode: --dry-run, --poll-once, --monitor, --heartbeat-once, --fake-smoke, --live-smoke, --console-tui, --console-gui, --ingest-user-memory, --lint-user-memory, --ingest-imessage-contacts, or --check-config"
         )
     if args.max_poll_cycles is not None and args.max_poll_cycles <= 0:
         parser.error("--max-poll-cycles must be greater than zero")
@@ -305,6 +312,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 max_poll_cycles=args.max_poll_cycles,
                 poll_interval_seconds=args.poll_interval_seconds,
             )
+        if args.heartbeat_once:
+            event_log = _console_event_log(config)
+            result = harness.run_heartbeat_tick()
+            _append_heartbeat_event(event_log, result)
+            print(format_heartbeat_tick(result))
+            return 0
         if args.live_smoke:
             return _run_monitor(
                 config,
@@ -447,6 +460,23 @@ def _format_config_check(config: HarnessConfig) -> str:
             ),
             "imessage_chat_db_path: {}".format(config.imessage_chat_db_path),
             "event_log_path: {}".format(config.event_log_path),
+            "heartbeat_enabled: {}".format(config.heartbeat.enabled),
+            "heartbeat_dry_run: {}".format(config.heartbeat.dry_run),
+            "heartbeat_interval_seconds: {}".format(config.heartbeat.interval_seconds),
+            "heartbeat_timezone: {}".format(config.heartbeat.timezone),
+            "heartbeat_quiet_hours: {}-{}".format(
+                config.heartbeat.quiet_hours_start or "<disabled>",
+                config.heartbeat.quiet_hours_end or "<disabled>",
+            ),
+            "heartbeat_max_daily_initiations: {}".format(
+                config.heartbeat.max_daily_initiations
+            ),
+            "heartbeat_owner_chat_id: {}".format(
+                config.heartbeat.owner_chat_id
+                if config.heartbeat.owner_chat_id is not None
+                else "<not configured>"
+            ),
+            "heartbeat_state_path: {}".format(config.heartbeat.state_path),
             "budget_snapshot_path: {}".format(config.budget_snapshot_path or "<not configured>"),
             "monthly_budget_usd: {}".format(_display_optional_config(config.monthly_budget_usd)),
             "project_budget_usd: {}".format(_display_optional_config(config.project_budget_usd)),
@@ -494,16 +524,25 @@ def _run_monitor(
 ) -> int:
     _validate_codex_app_server_command(config)
     event_log = _console_event_log(config)
+    heartbeat_supervisor = _HeartbeatMonitorSupervisor(
+        config,
+        poll_interval_seconds=poll_interval_seconds,
+        event_log=event_log,
+    )
+    heartbeat_supervisor.start()
     harness = VeraHarness(config, on_event=event_log.append_task_event)
     cycles = 0
-    while True:
-        result = harness.run_telegram_chat_poll_once()
-        _append_telegram_chat_events(event_log, result)
-        print(format_telegram_chat_loop(result, title=title))
-        cycles += 1
-        if max_poll_cycles is not None and cycles >= max_poll_cycles:
-            return 0
-        time.sleep(poll_interval_seconds)
+    try:
+        while True:
+            result = harness.run_telegram_chat_poll_once()
+            _append_telegram_chat_events(event_log, result)
+            print(format_telegram_chat_loop(result, title=title))
+            cycles += 1
+            if max_poll_cycles is not None and cycles >= max_poll_cycles:
+                return 0
+            time.sleep(poll_interval_seconds)
+    finally:
+        heartbeat_supervisor.stop()
 
 
 def _run_console_tui(config: HarnessConfig, args: argparse.Namespace) -> int:
@@ -543,6 +582,11 @@ class _ConsoleMonitorSupervisor:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._harness: Optional[VeraHarness] = None
+        self._heartbeat_supervisor = _HeartbeatMonitorSupervisor(
+            config,
+            poll_interval_seconds=poll_interval_seconds,
+            event_log=self._event_log,
+        )
 
     def start(self) -> None:
         startup_error = _console_monitor_startup_error(self._config)
@@ -556,6 +600,7 @@ class _ConsoleMonitorSupervisor:
             return
 
         self._harness = VeraHarness(self._config, on_event=self._event_log.append_task_event)
+        self._heartbeat_supervisor.start()
         self._event_log.append_source_event(
             source="console-tui",
             event_type="console_monitor_started",
@@ -573,6 +618,7 @@ class _ConsoleMonitorSupervisor:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=max(1.0, self._poll_interval_seconds + 1.0))
+        self._heartbeat_supervisor.stop()
 
     def _run(self) -> None:
         assert self._harness is not None
@@ -596,6 +642,66 @@ class _ConsoleMonitorSupervisor:
                 summary="Console monitor stopped.",
                 details=_console_monitor_details(self._config),
             )
+
+
+class _HeartbeatMonitorSupervisor:
+    """Run configured heartbeat ticks in a separate monitor thread."""
+
+    def __init__(
+        self,
+        config: HarnessConfig,
+        poll_interval_seconds: float,
+        event_log: Any,
+    ) -> None:
+        self._config = config
+        self._poll_interval_seconds = poll_interval_seconds
+        self._event_log = event_log
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if not self._config.heartbeat.enabled:
+            return
+        self._event_log.append_source_event(
+            source="heartbeat",
+            event_type="heartbeat_monitor_started",
+            summary="Heartbeat monitor started.",
+            details=_heartbeat_monitor_details(self._config),
+        )
+        self._thread = threading.Thread(
+            target=self._run,
+            name="vera-heartbeat-monitor",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self._poll_interval_seconds + 1.0))
+            self._event_log.append_source_event(
+                source="heartbeat",
+                event_type="heartbeat_monitor_stopped",
+                summary="Heartbeat monitor stopped.",
+                details=_heartbeat_monitor_details(self._config),
+            )
+
+    def _run(self) -> None:
+        harness = VeraHarness(self._config)
+        while not self._stop_event.is_set():
+            try:
+                result = harness.run_heartbeat_tick()
+                if result.reason_category != "cadence":
+                    _append_heartbeat_event(self._event_log, result)
+            except Exception as exc:  # noqa: BLE001 - keep the Telegram monitor alive.
+                _append_console_monitor_error(
+                    self._event_log,
+                    event_type="heartbeat_monitor_failed",
+                    summary="Heartbeat monitor tick failed: {}".format(exc),
+                    config=self._config,
+                )
+            if self._stop_event.wait(max(0.5, self._poll_interval_seconds)):
+                break
 
 
 def _console_monitor_startup_error(config: HarnessConfig) -> Optional[str]:
@@ -652,6 +758,23 @@ def _append_telegram_chat_events(event_log: Any, result: Any) -> None:
         )
 
 
+def _append_heartbeat_event(event_log: Any, result: Any) -> None:
+    event_log.append_source_event(
+        source="heartbeat",
+        event_type="heartbeat_tick",
+        summary=(
+            "Heartbeat {}: action={} reason={} sent={} dry_run={}".format(
+                result.status.value,
+                result.decision.action.value if result.decision is not None else "none",
+                result.reason_category,
+                result.message_sent,
+                result.dry_run,
+            )
+        ),
+        details=heartbeat_event_details(result),
+    )
+
+
 def _append_console_monitor_error(
     event_log: Any,
     event_type: str,
@@ -688,6 +811,23 @@ def _console_monitor_details(config: HarnessConfig) -> Mapping[str, object]:
         "identity_profile_path": str(config.identity_profile_path),
         "identity_interview_state_path": str(config.identity_interview_state_path),
         "codex_app_server_command": config.codex_app_server_command.display,
+        "heartbeat_enabled": config.heartbeat.enabled,
+        "heartbeat_dry_run": config.heartbeat.dry_run,
+        "heartbeat_state_path": str(config.heartbeat.state_path),
+    }
+
+
+def _heartbeat_monitor_details(config: HarnessConfig) -> Mapping[str, object]:
+    return {
+        "heartbeat_enabled": config.heartbeat.enabled,
+        "heartbeat_dry_run": config.heartbeat.dry_run,
+        "heartbeat_interval_seconds": config.heartbeat.interval_seconds,
+        "heartbeat_timezone": config.heartbeat.timezone,
+        "heartbeat_quiet_hours_start": config.heartbeat.quiet_hours_start,
+        "heartbeat_quiet_hours_end": config.heartbeat.quiet_hours_end,
+        "heartbeat_max_daily_initiations": config.heartbeat.max_daily_initiations,
+        "heartbeat_owner_chat_configured": config.heartbeat.owner_chat_id is not None,
+        "heartbeat_state_path": str(config.heartbeat.state_path),
     }
 
 

@@ -29,6 +29,18 @@ class HarnessConfigTests(unittest.TestCase):
                     "VERA_IDENTITY_PROFILE_PATH": str(Path(temp_dir, "identity-profile.json")),
                     "VERA_IDENTITY_INTERVIEW_STATE_PATH": str(Path(temp_dir, "identity-interviews.json")),
                     "VERA_USER_MEMORY_ROOT": str(Path(temp_dir, "memory", "users", "owner")),
+                    "VERA_EVENT_LOG_PATH": str(Path(temp_dir, "events.jsonl")),
+                    "VERA_HEARTBEAT_ENABLED": "true",
+                    "VERA_HEARTBEAT_DRY_RUN": "false",
+                    "VERA_HEARTBEAT_INTERVAL_SECONDS": "3600",
+                    "VERA_HEARTBEAT_TIMEZONE": "America/Los_Angeles",
+                    "VERA_HEARTBEAT_QUIET_HOURS_START": "21:30",
+                    "VERA_HEARTBEAT_QUIET_HOURS_END": "07:15",
+                    "VERA_HEARTBEAT_MAX_DAILY_INITIATIONS": "3",
+                    "VERA_HEARTBEAT_OWNER_CHAT_ID": "123",
+                    "VERA_HEARTBEAT_STATE_PATH": str(Path(temp_dir, "heartbeat-state.json")),
+                    "VERA_HEARTBEAT_REPEAT_COOLDOWN_SECONDS": "7200",
+                    "VERA_HEARTBEAT_MAX_RECENT_TOPICS": "9",
                     "VERA_WORKSPACE_ROOT": temp_dir,
                     "VERA_CODEX_APP_SERVER_COMMAND": "codex app-server --port 0",
                     "VERA_MAX_TURNS": "7",
@@ -71,6 +83,18 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.identity_profile_path, Path(temp_dir, "identity-profile.json").resolve())
         self.assertEqual(config.identity_interview_state_path, Path(temp_dir, "identity-interviews.json").resolve())
         self.assertEqual(config.user_memory_root, Path(temp_dir, "memory", "users", "owner").resolve())
+        self.assertEqual(config.event_log_path, Path(temp_dir, "events.jsonl").resolve())
+        self.assertTrue(config.heartbeat.enabled)
+        self.assertFalse(config.heartbeat.dry_run)
+        self.assertEqual(config.heartbeat.interval_seconds, 3600)
+        self.assertEqual(config.heartbeat.timezone, "America/Los_Angeles")
+        self.assertEqual(config.heartbeat.quiet_hours_start, "21:30")
+        self.assertEqual(config.heartbeat.quiet_hours_end, "07:15")
+        self.assertEqual(config.heartbeat.max_daily_initiations, 3)
+        self.assertEqual(config.heartbeat.owner_chat_id, 123)
+        self.assertEqual(config.heartbeat.state_path, Path(temp_dir, "heartbeat-state.json").resolve())
+        self.assertEqual(config.heartbeat.repeat_cooldown_seconds, 7200)
+        self.assertEqual(config.heartbeat.max_recent_topics, 9)
         self.assertEqual(config.workspace_root, Path(temp_dir).resolve())
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server", "--port", "0"))
         self.assertEqual(config.max_turns, 7)
@@ -119,6 +143,15 @@ class HarnessConfigTests(unittest.TestCase):
             config.imessage_chat_db_path,
             Path("~/Library/Messages/chat.db").expanduser().resolve(),
         )
+        self.assertFalse(config.heartbeat.enabled)
+        self.assertTrue(config.heartbeat.dry_run)
+        self.assertEqual(config.heartbeat.interval_seconds, 21600)
+        self.assertEqual(config.heartbeat.timezone, "UTC")
+        self.assertEqual(config.heartbeat.quiet_hours_start, "22:00")
+        self.assertEqual(config.heartbeat.quiet_hours_end, "08:00")
+        self.assertEqual(config.heartbeat.max_daily_initiations, 2)
+        self.assertIsNone(config.heartbeat.owner_chat_id)
+        self.assertEqual(config.heartbeat.state_path, runtime_root / "heartbeat_state.json")
         self.assertEqual(config.workspace_root, runtime_root / "workspaces")
         self.assertEqual(config.codex_app_server_command.argv, ("codex", "app-server"))
         self.assertEqual(config.max_retries, 1)
@@ -254,6 +287,51 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.owner_profile.wiki_profile_path, profile_path.resolve())
         self.assertIn("prefer correction", config.owner_profile.wiki_profile_excerpt)
         self.assertEqual(config.user_memory_root, Path(temp_dir, "memory", "users", "owner").resolve())
+
+    def test_load_reads_heartbeat_config_section(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            state_path = Path(temp_dir, "heartbeat-state.json")
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "telegram": {
+                            "allowed_chat_ids": [100],
+                            "allowed_user_ids": [200],
+                        },
+                        "owner": {"user_id": 200},
+                        "heartbeat": {
+                            "enabled": True,
+                            "dry_run": True,
+                            "interval_seconds": 1800,
+                            "timezone": "America/New_York",
+                            "quiet_hours": {"start": "23:00", "end": "06:30"},
+                            "max_daily_initiations": 1,
+                            "owner_chat_id": 100,
+                            "state_path": str(state_path),
+                            "repeat_cooldown_seconds": 3600,
+                            "max_recent_topics": 5,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = HarnessConfig.load(
+                {"VERA_TELEGRAM_BOT_TOKEN": "token-placeholder"},
+                telegram_config_path=str(config_path),
+                require_secrets=True,
+            )
+
+        self.assertTrue(config.heartbeat.enabled)
+        self.assertTrue(config.heartbeat.dry_run)
+        self.assertEqual(config.heartbeat.interval_seconds, 1800)
+        self.assertEqual(config.heartbeat.timezone, "America/New_York")
+        self.assertEqual(config.heartbeat.quiet_hours_start, "23:00")
+        self.assertEqual(config.heartbeat.quiet_hours_end, "06:30")
+        self.assertEqual(config.heartbeat.max_daily_initiations, 1)
+        self.assertEqual(config.heartbeat.owner_chat_id, 100)
+        self.assertEqual(config.heartbeat.state_path, state_path.resolve())
 
     def test_load_reads_assistant_identity_from_config_and_profile_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -422,6 +500,16 @@ class HarnessConfigTests(unittest.TestCase):
             {"VERA_TELEGRAM_API_BASE_URL": "api.telegram.org"},
             {"VERA_TELEGRAM_POLL_TIMEOUT_SECONDS": "0"},
             {"VERA_TELEGRAM_REQUEST_TIMEOUT_SECONDS": "-1"},
+            {"VERA_HEARTBEAT_ENABLED": "maybe"},
+            {"VERA_HEARTBEAT_INTERVAL_SECONDS": "0"},
+            {"VERA_HEARTBEAT_TIMEZONE": "Not/AZone"},
+            {"VERA_HEARTBEAT_QUIET_HOURS_START": "25:00"},
+            {
+                "VERA_ALLOWED_CHAT_IDS": "100",
+                "VERA_HEARTBEAT_OWNER_CHAT_ID": "999",
+            },
+            {"VERA_HEARTBEAT_MAX_DAILY_INITIATIONS": "-1"},
+            {"VERA_HEARTBEAT_REPEAT_COOLDOWN_SECONDS": "0"},
             {"VERA_WORKSPACE_BOOTSTRAP_TIMEOUT_SECONDS": "0"},
             {"VERA_WORKSPACE_RETENTION_POLICY": "always-delete"},
             {"VERA_APPROVAL_POLICY": "sometimes"},

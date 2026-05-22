@@ -93,6 +93,22 @@ High-sensitivity inferred memory is not written directly into wiki pages. It is
 held in the confirmation review queue until the user explicitly confirms the
 claim should be stored.
 
+## Implemented Owner Question Boundary
+
+The harness now has a durable owner-question queue for context-building
+questions that should be asked later instead of interrupting immediately.
+Candidate questions keep stable ids, source/reason labels, optional subject
+references, priority, lifecycle status, timestamps, and cooldowns. Duplicate or
+near-identical questions for the same source and subject are merged so repeated
+contact discovery or memory-gap signals do not spam the owner.
+
+Heartbeat or another proactive path can select one eligible pending question and
+then mark it asked, deferred, answered, dismissed, or expired. When the owner
+answers, the queue records only answer metadata and a hash. The answer body is
+persisted through the existing user-memory wiki as confirmed owner-provided
+context, with an `owner_question:<question_id>` locator and hash-only raw source
+retention. Secret-like answers are rejected for memory persistence.
+
 ## Implemented Lint Boundary
 
 The harness can scan a configured user-memory corpus and produce a reviewable

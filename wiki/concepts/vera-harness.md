@@ -31,6 +31,11 @@ runtime execution explicit:
   before durable writes, stores confirmed profile entries separately from raw
   interview transcript, and injects confirmed guidance into future prompts as
   revisable practical context rather than personality labeling.
+- **Owner question queue:** gives Vera subsystems a durable, non-interrupting
+  backlog for owner-directed context questions. Producers can add candidate
+  questions with source/reason, subject refs, priority, status, timestamps, and
+  cooldowns. Proactive callers can select one eligible pending question later,
+  then mark it asked, answered, dismissed, deferred, or expired.
 - **Telegram configuration:** keeps non-secret connectivity settings in a
   local JSON config file while leaving the bot token in an environment-backed
   secret path.
@@ -77,6 +82,12 @@ runtime execution explicit:
   logs with session ids, Telegram ids, workspace paths, Codex thread/turn ids
   when available, and final outcomes. The legacy per-task loop remains
   available for dry-run, fake smoke, and intake diagnostics.
+- **Heartbeat monitor:** optionally runs a separate proactive scheduler beside
+  Telegram polling. Heartbeats are disabled by default, use explicit cadence,
+  quiet-hour, timezone, daily-limit, owner-chat, dry-run, and repeat-cooldown
+  configuration, build a compact metadata-only context, route the decision
+  through the existing Vera policy prompt, and either do nothing or send one
+  owner-facing Telegram message through the existing Bot API send path.
 - **Console observability:** projects run state, structured events, focus
   selection, last-turn summaries, current plan, redacted log stream, and budget
   telemetry into a shared state provider used by both terminal and local web
@@ -153,6 +164,15 @@ runtime execution explicit:
   while avoiding raw Telegram message text and unnecessary user context.
 - Persistent chat-session state may record the last assistant response and
   pending prompt, but it should not record raw inbound Telegram message text.
+- Heartbeat state should stay separate from run/chat state and contain only
+  scheduler metadata: last tick, daily initiation count, last decision category,
+  and recent topic fingerprints. It must not persist raw Telegram text, owner
+  profile details, user-memory content, or proactive message bodies.
+- Proactive heartbeat sends must remain opt-in, owner-scoped, and
+  policy-governed. Disabled heartbeat config must leave Telegram polling
+  behavior unchanged, dry-run heartbeat must never call Telegram, and live
+  heartbeat may send only to the configured owner chat allowed by Telegram
+  configuration.
 - Identity/style profile entries should be confirmed before persistence and
   should carry source, timestamp, confidence, and an explicit correction path.
 - Raw identity interview transcript belongs in a separate interview state file;
@@ -161,6 +181,10 @@ runtime execution explicit:
 - Owner profile guidance should remain calibrated and revisable: it must not be
   treated as fixed personality truth, and explicit corrections should override
   older profile entries.
+- Owner context gaps should be queued as explicit questions rather than filled
+  through hidden inference. Duplicate candidate questions for the same source
+  and subject should merge, and answers should carry provenance back to the
+  queue item.
 - Console events should use a small structured schema rather than ad hoc log
   parsing, and should redact secrets plus raw private source-channel bodies by
   default.
