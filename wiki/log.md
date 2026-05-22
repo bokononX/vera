@@ -1,5 +1,8 @@
 # Change log
 
+- 2026-05-22: Added the boss onboarding manual and linked the Vera harness and
+  Herald user memory concepts to its explicit-consent question generation,
+  heartbeat selection, and owner-confirmed memory boundaries.
 - 2026-05-22: Updated the Vera harness and Herald user memory concepts with
   disabled-by-default, read-only iMessage contact metadata ingest and the
   boundary that discovered handles remain owner-review open questions until

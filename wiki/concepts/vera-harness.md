@@ -35,7 +35,10 @@ runtime execution explicit:
   backlog for owner-directed context questions. Producers can add candidate
   questions with source/reason, subject refs, priority, status, timestamps, and
   cooldowns. Proactive callers can select one eligible pending question later,
-  then mark it asked, answered, dismissed, deferred, or expired.
+  then mark it asked, answered, dismissed, deferred, or expired. The
+  [boss onboarding manual](../../docs/boss-onboarding-manual.md) governs which
+  gaps should become questions, when they may be asked, and how answers become
+  confirmed owner context.
 - **Telegram configuration:** keeps non-secret connectivity settings in a
   local JSON config file while leaving the bot token in an environment-backed
   secret path.
@@ -185,6 +188,10 @@ runtime execution explicit:
   through hidden inference. Duplicate candidate questions for the same source
   and subject should merge, and answers should carry provenance back to the
   queue item.
+- Boss-onboarding producers must keep observation, inference, and confirmed
+  owner memory separate. Contact, heartbeat, and task metadata can create
+  questions, but private message content must not become relationship or
+  sensitive personal facts.
 - Console events should use a small structured schema rather than ad hoc log
   parsing, and should redact secrets plus raw private source-channel bodies by
   default.
@@ -214,3 +221,4 @@ runtime execution explicit:
 
 - [README](../../README.md)
 - [Project concept document](../../docs/concept.md)
+- [Boss onboarding manual](../../docs/boss-onboarding-manual.md)

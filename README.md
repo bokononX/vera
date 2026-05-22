@@ -147,6 +147,12 @@ The heartbeat decision can choose:
 - `follow_up_unresolved`
 - `lightweight_check_in`
 
+Context-building heartbeat questions are governed by the
+[boss onboarding manual](docs/boss-onboarding-manual.md): heartbeat should ask
+at most one queued question, prefer recent or active context, use soft
+permission framing, and cool down ignored or deferred questions rather than
+repeating them.
+
 Only the configured `owner_chat_id` is used for proactive sends, and the
 Telegram message is sent through the same Bot API `sendMessage` path as regular
 responses, without `reply_to_message_id`.
@@ -341,6 +347,11 @@ understand them in your life?` without mutating files. Add
 marked `memory_state: open_question`, `review_status: needs_user_review`, and
 `prompt_visibility: confirm_first`.
 
+The [boss onboarding manual](docs/boss-onboarding-manual.md) is the governing
+spec for turning discovered contact metadata into owner questions. Contact
+frequency or message metadata may create a question candidate, but it must not
+be treated as relationship context until the owner confirms it.
+
 This path is disabled by default. When enabled, it opens only
 `~/Library/Messages/chat.db` metadata tables (`handle`, `chat`, and
 `chat_handle_join`) through SQLite read-only mode and `query_only`; it does not
@@ -388,6 +399,11 @@ Heartbeat or another proactive path can call
 `mark_asked()` after sending it. If the owner postpones it, call
 `defer_question(question_id, do_not_ask_before=...)`; if the owner declines it,
 call `dismiss_question()`.
+
+Question producers and asking surfaces should follow the
+[boss onboarding manual](docs/boss-onboarding-manual.md) for admission,
+priority, ask timing, wording, answer handling, and the explicit rule that
+observation can create a question but only the owner can confirm memory.
 
 When the owner answers, call `mark_answered(..., memory_root=..., owner_user=...)`.
 The queue records only answer metadata and a hash. The answer body is written
