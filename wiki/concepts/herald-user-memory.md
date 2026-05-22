@@ -59,12 +59,33 @@ Retrieval keeps prompt packets compact and provenance-bearing. Prompt facts and
 caveats include page paths, source ids, confidence, and sensitivity markers.
 Corrections, open questions, contested pages, and `confirm_first` pages are
 rendered as caveats or confirmation constraints rather than ordinary facts.
-Restricted and secret memory are excluded by default; private memory is only
-used for the configured owner path and must still be task-relevant.
+Private, restricted, and secret memory are excluded from ordinary Codex prompts
+by default. Code paths that need more disclosure must opt into those sensitivity
+classes explicitly, and the selected memory must still be task-relevant.
 
 Each task run records the selected memory page ids/paths in JSON run state, so
 debugging can inspect what memory influenced the prompt without reconstructing
 the full wiki disclosure.
+
+## Implemented User Control Boundary
+
+Owner Telegram chat now has first-class user-memory controls before normal
+Codex turns. The owner can ask what is remembered about a topic, correct a
+memory, forget a memory, mark a memory as more sensitive, and review recent
+memory updates.
+
+The control path works against synthesized wiki pages rather than raw source
+dumps. Listing returns source ids, confidence, sensitivity, prompt visibility,
+and review metadata. Corrections create linked correction pages and update the
+active claim summary used by retrieval while preserving older wording for audit.
+Forget requests tombstone the affected page, remove prompt eligibility, redact
+claim text from source references, rebuild the index, and append a non-revealing
+log entry. Sensitivity marks update prompt visibility so future retrieval obeys
+the new classification.
+
+High-sensitivity inferred memory is not written directly into wiki pages. It is
+held in the confirmation review queue until the user explicitly confirms the
+claim should be stored.
 
 ## Implemented Lint Boundary
 

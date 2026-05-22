@@ -1,3 +1,4 @@
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -10,8 +11,10 @@ from vera_harness.user_memory import (
     SourceRetention,
     WikiLintOptions,
     UserMemoryRetrievalOptions,
+    UserMemoryControlController,
     ingest_user_memory,
     lint_user_memory,
+    load_user_memory_page,
     load_messages_from_file,
     messages_from_json_payload,
     parse_conversation_text,
@@ -299,6 +302,117 @@ class UserMemoryRetrievalTests(unittest.TestCase):
         self.assertIn("confirm_first", block)
 
 
+class UserMemoryControlTests(unittest.TestCase):
+    def test_lists_memory_with_source_confidence_and_sensitivity_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = _copy_memory_fixture(temp_dir)
+            controller = UserMemoryControlController()
+
+            response = controller.handle(
+                _telegram_task("what do you remember about engineering updates?"),
+                root,
+            )
+
+            self.assertIn("Direct Engineering Updates", response)
+            self.assertIn("confidence: high", response)
+            self.assertIn("sensitivity: private", response)
+            self.assertIn("source: src-pref-direct-updates", response)
+
+    def test_correction_updates_active_claim_and_keeps_correction_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = _copy_memory_fixture(temp_dir)
+            controller = UserMemoryControlController()
+
+            response = controller.handle(
+                _telegram_task(
+                    "correct engineering updates to User prefers narrative engineering updates for planning."
+                ),
+                root,
+            )
+
+            self.assertIn("Updated Direct Engineering Updates", response)
+            page = load_user_memory_page(root, "wiki/preferences/direct-engineering-updates.md")
+            self.assertIsNotNone(page)
+            assert page is not None
+            self.assertIn("narrative engineering updates", page.summary)
+            self.assertTrue(page.corrections)
+            correction_page = root / page.corrections[0]
+            self.assertTrue(correction_page.exists())
+            context = retrieve_user_memory_for_task(
+                _telegram_task("Use engineering updates for planning."),
+                UserMemoryRetrievalOptions(root=root, allow_private=True),
+            )
+            prompt_block = context.render_prompt_block()
+            self.assertIn("narrative engineering updates", prompt_block)
+            self.assertNotIn("concrete validation evidence", prompt_block)
+
+    def test_forget_tombstones_page_updates_index_log_and_retrieval(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = _copy_memory_fixture(temp_dir)
+            controller = UserMemoryControlController()
+
+            response = controller.handle(_telegram_task("forget medical detail"), root)
+
+            self.assertIn("Forgot 1 memory page", response)
+            page_text = (root / "wiki" / "preferences" / "private-medical-detail.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("status: deleted", page_text)
+            self.assertIn("memory_state: retracted", page_text)
+            self.assertNotIn("Restricted health-related preference exists", page_text)
+            self.assertNotIn("Private Medical Detail", (root / "index.md").read_text(encoding="utf-8"))
+            self.assertIn("memory-control forget", (root / "log.md").read_text(encoding="utf-8"))
+            context = retrieve_user_memory_for_task(
+                _telegram_task("Use medical memory."),
+                UserMemoryRetrievalOptions(root=root, allow_private=True, allow_restricted=True),
+            )
+            self.assertFalse(
+                any(page.relative_path == "wiki/preferences/private-medical-detail.md" for page in context.selected_pages)
+            )
+
+    def test_mark_this_as_sensitive_uses_last_listed_memory_and_excludes_retrieval(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = _copy_memory_fixture(temp_dir)
+            controller = UserMemoryControlController()
+
+            controller.handle(_telegram_task("what do you remember about engineering updates?"), root)
+            response = controller.handle(_telegram_task("mark this as sensitive"), root)
+
+            self.assertIn("Marked Direct Engineering Updates as `restricted`", response)
+            page = load_user_memory_page(root, "wiki/preferences/direct-engineering-updates.md")
+            self.assertIsNotNone(page)
+            assert page is not None
+            self.assertEqual(page.sensitivity, "restricted")
+            self.assertEqual(page.prompt_visibility, "confirm_first")
+            context = retrieve_user_memory_for_task(
+                _telegram_task("Use concise engineering updates."),
+                UserMemoryRetrievalOptions(root=root, allow_private=True, allow_restricted=False),
+            )
+            self.assertGreaterEqual(context.omitted_sensitive_count, 1)
+            self.assertFalse(
+                any(page.relative_path == "wiki/preferences/direct-engineering-updates.md" for page in context.selected_pages)
+            )
+
+    def test_high_sensitivity_inferred_memory_requires_confirmation_before_storage(self):
+        messages = parse_conversation_text("User: I might prefer medical triage reminders.")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir, "memory")
+            plan = ingest_user_memory(
+                messages=messages,
+                source_text=messages[0].text,
+                options=_options(root),
+                apply=True,
+            )
+
+            self.assertEqual(len(plan.confirmation_required_candidates), 1)
+            self.assertFalse((root / "wiki" / "preferences").exists() and list((root / "wiki" / "preferences").glob("*.md")))
+            pending = (root / "review" / "pending.md").read_text(encoding="utf-8")
+            self.assertIn("high-sensitivity inferred claim withheld", pending)
+            self.assertNotIn("triage reminders", pending)
+            self.assertIn("confirmation_required: 1", (root / "log.md").read_text(encoding="utf-8"))
+
+
 class UserMemoryLintTests(unittest.TestCase):
     def test_lint_reports_known_consolidation_findings_and_review_items(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -449,6 +563,16 @@ def _options(root: Path, channel: str = "codex") -> IngestOptions:
         captured_at=CAPTURED_AT,
         source_retention=SourceRetention.HASH_ONLY,
     )
+
+
+def _copy_memory_fixture(temp_dir: str) -> Path:
+    root = Path(temp_dir, "memory")
+    shutil.copytree(MEMORY_FIXTURE, root)
+    return root
+
+
+def _telegram_task(text: str) -> TelegramTask:
+    return TelegramTask.from_message(chat_id=100, user_id=200, message_id=300, text=text)
 
 
 def _write_manifest(root: Path, *source_ids: str) -> None:

@@ -270,12 +270,35 @@ Set `VERA_USER_MEMORY_ROOT` or `owner.user_memory_root` in the local Telegram
 config to point at one user-memory corpus. When a Telegram task is built for
 Codex, Vera reads that corpus, retrieves a bounded set of task-relevant wiki
 pages, filters private/restricted/secret pages through prompt-visibility gates,
-and adds a compact `User Memory Context` block to the prompt.
+and adds a compact `User Memory Context` block to the prompt. Ordinary Codex
+prompts do not receive private, restricted, or secret pages by default; callers
+must explicitly opt into those retrieval classes in code.
 
 The memory block includes page paths, source ids, confidence, sensitivity, and
 caveats for corrections, contradictions, open questions, and `confirm_first`
 memory. It records the memory page ids/paths used in JSON run state so each task
 run can be audited without dumping the full wiki into every prompt.
+
+## User Memory Controls
+
+Owner Telegram chat messages are checked for memory controls before normal
+Codex chat turns. Supported controls are:
+
+- `what do you remember about X?` lists matching wiki-memory claims with page
+  path, memory state, confidence, sensitivity, prompt visibility, review status,
+  and source metadata.
+- `correct X to Y` records a correction page, updates the active claim summary
+  used by retrieval, and links the older page to the correction for auditability.
+- `forget X` tombstones the matching synthesized memory, redacts source
+  references according to retention policy, rebuilds `index.md`, and appends a
+  deletion audit entry without restating private claim text.
+- `mark X as private`, `mark X as restricted`, or `mark this as sensitive`
+  changes sensitivity and prompt visibility. `this` targets the most recent
+  memory-control result in the same Telegram chat session.
+- `show recent memory updates` returns recent `log.md` audit entries.
+
+Use `/memory help`, `/memory show X`, `/memory search X`, `/memory correct X to
+Y`, `/memory forget X`, and `/memory recent` as command-style aliases.
 
 Assistant identity is handled before owner identity and before Codex in
 persistent chat mode. The active assistant has a first-class profile with a

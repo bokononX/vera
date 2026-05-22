@@ -57,6 +57,7 @@ from .telegram import (
     format_telegram_status,
 )
 from .user_memory import (
+    UserMemoryControlController,
     UserMemoryPromptContext,
     UserMemoryRetrievalOptions,
     retrieve_user_memory_for_task,
@@ -264,6 +265,7 @@ class VeraHarness:
                 ),
             )
         )
+        self._user_memory_controls = UserMemoryControlController()
         self._on_event = on_event
 
     def _owner_identity_commands_allowed(self, task: TelegramTask) -> bool:
@@ -284,7 +286,7 @@ class VeraHarness:
             task,
             UserMemoryRetrievalOptions(
                 root=root,
-                allow_private=True,
+                allow_private=False,
                 allow_restricted=False,
             ),
         )
@@ -739,6 +741,25 @@ class VeraHarness:
                         chat_id=task.chat_id,
                         message_id=task.message_id,
                         text=identity_response,
+                        status=TelegramTaskStatus.COMPLETED,
+                    )
+                )
+                continue
+            memory_control_response = (
+                self._user_memory_controls.handle(task, self._config.user_memory_root)
+                if self._owner_identity_commands_allowed(task)
+                else None
+            )
+            if memory_control_response is not None:
+                intake.send_chat_response(task, memory_control_response)
+                responses.append(
+                    TelegramChatResponseDelivery(
+                        update_id=update_id,
+                        session_id="user_memory:{}".format(task.task_id),
+                        task_id=task.task_id,
+                        chat_id=task.chat_id,
+                        message_id=task.message_id,
+                        text=memory_control_response,
                         status=TelegramTaskStatus.COMPLETED,
                     )
                 )

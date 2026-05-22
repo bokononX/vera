@@ -1,4 +1,5 @@
 import json
+import shutil
 import tempfile
 import unittest
 from dataclasses import replace
@@ -130,14 +131,15 @@ class OrchestrationLoopTests(unittest.TestCase):
 
             self.assertEqual(result.harness_run.status, HarnessRunStatus.COMPLETED)
             self.assertIn("## User Memory Context", result.invocation.prompt)
-            self.assertIn("Direct Engineering Updates", result.invocation.prompt)
+            self.assertIn("Herald User Memory", result.invocation.prompt)
+            self.assertNotIn("Direct Engineering Updates", result.invocation.prompt)
             state = JsonRunStateStore(config.run_state_path).run_for_task(task.task_id)
             self.assertTrue(
-                any("wiki/preferences/direct-engineering-updates.md" in item for item in state.memory_pages_used)
+                any("wiki/projects/herald-user-memory.md" in item for item in state.memory_pages_used)
             )
             prompt_event = next(event for event in result.events if event.type == TaskEventType.PROMPT_BUILT)
             self.assertTrue(
-                any("wiki/preferences/direct-engineering-updates.md" in item for item in prompt_event.payload["user_memory_pages"])
+                any("wiki/projects/herald-user-memory.md" in item for item in prompt_event.payload["user_memory_pages"])
             )
 
     def test_continue_marker_runs_until_completion_or_max_turns(self):
@@ -491,6 +493,59 @@ class TelegramChatSessionTests(unittest.TestCase):
             self.assertIn("I'm Vera", response)
             self.assertIn("Codex/OpenAI tooling is the runtime layer", response)
             self.assertIn("not my normal user-facing identity", response)
+
+    def test_user_memory_controls_run_over_fake_telegram_without_codex_turns(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_root = Path(temp_dir, "memory")
+            shutil.copytree(MEMORY_FIXTURE, memory_root)
+            config = _config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_CHAT_IDS": "100",
+                    "VERA_ALLOWED_USER_IDS": "200",
+                    "VERA_USER_MEMORY_ROOT": str(memory_root),
+                },
+            )
+            texts = (
+                "what do you remember about engineering updates?",
+                "correct engineering updates to User prefers narrative engineering updates for planning.",
+                "what do you remember about engineering updates?",
+                "mark this as sensitive",
+                "forget engineering updates",
+                "show recent memory updates",
+            )
+            api = FakeTelegramApi(_message_updates(210, texts))
+            intake = TelegramLongPollingIntake(
+                config,
+                api=api,
+                store=TelegramUpdateStore(config.telegram_state_path),
+                send_accepted_reply=False,
+            )
+            runtime = ScriptedChatRuntime(("unused",))
+            harness = VeraHarness(config, chat_runtime_factory=lambda resume_thread_id: runtime)
+
+            result = harness.run_telegram_chat_poll_once(
+                polling_intake=intake,
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(runtime.calls, 0)
+            self.assertEqual(len(result.chat_turns), 0)
+            self.assertEqual(len(api.sent_messages), len(texts))
+            self.assertIn("Direct Engineering Updates", api.sent_messages[0]["text"])
+            self.assertIn("source: src-pref-direct-updates", api.sent_messages[0]["text"])
+            self.assertIn("Updated Direct Engineering Updates", api.sent_messages[1]["text"])
+            self.assertIn("narrative engineering updates", api.sent_messages[2]["text"])
+            self.assertIn("Marked Direct Engineering Updates as `restricted`", api.sent_messages[3]["text"])
+            self.assertIn("Forgot 1 memory page", api.sent_messages[4]["text"])
+            self.assertIn("memory-control forget", api.sent_messages[5]["text"])
+
+            deleted_page = (memory_root / "wiki" / "preferences" / "direct-engineering-updates.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("status: deleted", deleted_page)
+            self.assertIn("memory_state: retracted", deleted_page)
+            self.assertNotIn("narrative engineering updates", deleted_page)
 
     def test_assistant_identity_interview_updates_future_prompt(self):
         with tempfile.TemporaryDirectory() as temp_dir:
