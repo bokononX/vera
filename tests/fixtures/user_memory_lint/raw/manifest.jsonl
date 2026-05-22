@@ -1,0 +1,4 @@
+{"path": "raw/redactions/src-lint-one.json", "sensitivity": "private", "source_id": "src-lint-one"}
+{"path": "raw/redactions/src-lint-two.json", "sensitivity": "private", "source_id": "src-lint-two"}
+{"path": "raw/redactions/src-lint-three.json", "sensitivity": "private", "source_id": "src-lint-three"}
+{"path": "raw/redactions/src-lint-four.json", "sensitivity": "private", "source_id": "src-lint-four"}

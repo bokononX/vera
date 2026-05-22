@@ -247,5 +247,74 @@ class CliConfigTests(unittest.TestCase):
         self.assertFalse(memory_root.exists())
 
 
+class CliUserMemoryLintTests(unittest.TestCase):
+    def test_user_memory_lint_dry_run_does_not_require_live_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_root = Path(temp_dir, "memory")
+            page = memory_root / "wiki" / "preferences" / "direct-updates.md"
+            page.parent.mkdir(parents=True, exist_ok=True)
+            page.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "id: mem-preference-direct-updates",
+                        "title: Direct Updates",
+                        "page_type: preference",
+                        "owner_user: user-test",
+                        "status: active",
+                        "memory_state: confirmed",
+                        "confidence:",
+                        "  level: high",
+                        "  score: 0.90",
+                        "sensitivity: private",
+                        "prompt_visibility: task_only",
+                        "review_status: user_confirmed",
+                        "created_at: 2026-05-01T00:00:00Z",
+                        "updated_at: 2026-05-01T00:00:00Z",
+                        "last_observed_at: 2026-05-01T00:00:00Z",
+                        "last_confirmed_at: 2026-05-01T00:00:00Z",
+                        "stale_after: P90D",
+                        "source_refs: []",
+                        "related: []",
+                        "supersedes: []",
+                        "superseded_by: []",
+                        "contradictions: []",
+                        "corrections: []",
+                        "tags: [test]",
+                        "---",
+                        "",
+                        "# Direct Updates",
+                        "",
+                        "User prefers direct updates.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {}, clear=True):
+                with contextlib.redirect_stdout(stdout):
+                    status = cli.main(
+                        [
+                            "--lint-user-memory",
+                            "--memory-root",
+                            str(memory_root),
+                            "--memory-user-id",
+                            "user-test",
+                            "--memory-lint-as-of",
+                            "2026-05-21T00:00:00Z",
+                        ]
+                    )
+
+            rendered = stdout.getvalue()
+
+        self.assertEqual(status, 0)
+        self.assertIn("User memory lint/consolidation report (dry-run)", rendered)
+        self.assertIn("Missing metadata:", rendered)
+        self.assertIn("Dry-run only: no files were mutated.", rendered)
+        self.assertFalse((memory_root / "log.md").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
