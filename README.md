@@ -246,6 +246,52 @@ The default source-retention policy is `hash_only`: the ingest writes
 conversation text. Use `--memory-source-retention store` only when the source
 policy explicitly allows raw transcript storage.
 
+## Owner Question Queue
+
+Vera subsystems can enqueue owner-directed questions without interrupting the
+current conversation by using `vera_harness.owner_questions.OwnerQuestionQueue`
+with a `JsonOwnerQuestionQueueStore` path, for example:
+
+```python
+from pathlib import Path
+
+from vera_harness.owner_questions import (
+    JsonOwnerQuestionQueueStore,
+    OwnerQuestionQueue,
+    OwnerQuestionSubjectRef,
+)
+
+queue = OwnerQuestionQueue(JsonOwnerQuestionQueueStore(Path("./runtime/owner_questions.json")))
+question = queue.enqueue_question(
+    "Who is Alice Example, and how should I understand your relationship with them?",
+    source="imessage_contact_discovery",
+    subject_ref=OwnerQuestionSubjectRef(
+        kind="imessage_contact",
+        subject_id="imessage:+15550100",
+        label="Alice Example",
+    ),
+    priority=10,
+)
+```
+
+The queue persists `pending`, `asked`, `answered`, `dismissed`, and `expired`
+state, stable ids, source/reason metadata, optional subject refs, priority,
+timestamps, and optional cooldowns. Equivalent candidate questions for the same
+source and subject are merged instead of queued repeatedly.
+
+Heartbeat or another proactive path can call
+`select_next_pending_question()` to choose one eligible question, then
+`mark_asked()` after sending it. If the owner postpones it, call
+`defer_question(question_id, do_not_ask_before=...)`; if the owner declines it,
+call `dismiss_question()`.
+
+When the owner answers, call `mark_answered(..., memory_root=..., owner_user=...)`.
+The queue records only answer metadata and a hash. The answer body is written
+through the existing user-memory wiki as explicit owner-provided context with an
+`owner_question:<question_id>` locator and hash-only raw source retention.
+Secret-like answers are rejected for memory persistence instead of being written
+into queue logs or raw source records.
+
 ## User Memory Lint
 
 The harness can scan a user-memory corpus for schema drift, stale pages,
