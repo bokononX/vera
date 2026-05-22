@@ -31,6 +31,11 @@ runtime execution explicit:
   before durable writes, stores confirmed profile entries separately from raw
   interview transcript, and injects confirmed guidance into future prompts as
   revisable practical context rather than personality labeling.
+- **Owner question queue:** gives Vera subsystems a durable, non-interrupting
+  backlog for owner-directed context questions. Producers can add candidate
+  questions with source/reason, subject refs, priority, status, timestamps, and
+  cooldowns. Proactive callers can select one eligible pending question later,
+  then mark it asked, answered, dismissed, deferred, or expired.
 - **Telegram configuration:** keeps non-secret connectivity settings in a
   local JSON config file while leaving the bot token in an environment-backed
   secret path.
@@ -165,6 +170,10 @@ runtime execution explicit:
 - Owner profile guidance should remain calibrated and revisable: it must not be
   treated as fixed personality truth, and explicit corrections should override
   older profile entries.
+- Owner context gaps should be queued as explicit questions rather than filled
+  through hidden inference. Duplicate candidate questions for the same source
+  and subject should merge, and answers should carry provenance back to the
+  queue item.
 - Console events should use a small structured schema rather than ad hoc log
   parsing, and should redact secrets plus raw private source-channel bodies by
   default.
