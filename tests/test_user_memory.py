@@ -8,8 +8,10 @@ from vera_harness.user_memory import (
     MemoryState,
     PageType,
     SourceRetention,
+    WikiLintOptions,
     UserMemoryRetrievalOptions,
     ingest_user_memory,
+    lint_user_memory,
     load_messages_from_file,
     messages_from_json_payload,
     parse_conversation_text,
@@ -297,6 +299,147 @@ class UserMemoryRetrievalTests(unittest.TestCase):
         self.assertIn("confirm_first", block)
 
 
+class UserMemoryLintTests(unittest.TestCase):
+    def test_lint_reports_known_consolidation_findings_and_review_items(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir, "memory")
+            _write_manifest(root, "src-one", "src-two", "src-three", "src-four", "src-five")
+            _write_lint_page(
+                root,
+                "wiki/preferences/direct-updates.md",
+                "Direct Engineering Updates",
+                source_id="src-one",
+                related=("wiki/preferences/direct-engineering-updates.md",),
+                last_observed_at="2026-01-01T00:00:00Z",
+                stale_after="P30D",
+                body="User prefers concise engineering status updates.",
+            )
+            _write_lint_page(
+                root,
+                "wiki/preferences/direct-engineering-updates.md",
+                "Direct Engineering Updates",
+                source_id="src-two",
+                body="User prefers concise engineering updates with validation evidence.",
+            )
+            _write_lint_page(
+                root,
+                "wiki/preferences/orphan-status-format.md",
+                "Orphan Status Format",
+                source_id="src-three",
+                body="User prefers terse status formatting.",
+            )
+            _write_lint_page(
+                root,
+                "wiki/values/status-format.md",
+                "Status Format",
+                page_type="value",
+                source_id="src-four",
+                body="User values concise status format for this task.",
+            )
+            _write_lint_page(
+                root,
+                "wiki/preferences/missing-metadata.md",
+                "Missing Metadata",
+                source_id="src-five",
+                include_confidence=False,
+                include_source_refs=False,
+                body="User prefers reviewable memory reports.",
+            )
+            _write_lint_page(
+                root,
+                "wiki/preferences/contested-status.md",
+                "Contested Status",
+                source_id="src-five",
+                status="contested",
+                review_status="disputed",
+                contradictions=("wiki/preferences/direct-updates.md",),
+                body="User preference conflicts with an older status style claim.",
+            )
+            (root / "index.md").write_text(
+                "# User Memory Index\n\n"
+                "## Preferences\n\n"
+                "- [Direct Updates](wiki/preferences/direct-updates.md) - confirmed; confidence: high\n",
+                encoding="utf-8",
+            )
+
+            report = lint_user_memory(
+                WikiLintOptions(
+                    root=root,
+                    as_of=datetime(2026, 5, 21, 0, 0, tzinfo=timezone.utc),
+                )
+            )
+
+        self.assertTrue(report.duplicate_candidates)
+        self.assertIn("wiki/preferences/orphan-status-format.md", report.orphan_pages)
+        self.assertIn("wiki/preferences/direct-updates.md", report.stale_pages)
+        self.assertTrue(
+            any(item.path == "wiki/preferences/missing-metadata.md" for item in report.missing_metadata)
+        )
+        self.assertTrue(
+            any(item.path == "wiki/preferences/contested-status.md" for item in report.unresolved_contradictions)
+        )
+        self.assertTrue(report.relationship_type_suggestions)
+        self.assertTrue(
+            any(item.suggested_type.value != "related" for item in report.relationship_type_suggestions)
+        )
+        review_categories = {item.category for item in report.review_items}
+        self.assertIn("duplicate", review_categories)
+        self.assertIn("relationship", review_categories)
+        self.assertIn("concept-level", review_categories)
+        self.assertIn("contradiction", review_categories)
+
+    def test_lint_apply_performs_safe_fixes_and_appends_log(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir, "memory")
+            _write_manifest(root, "src-one", "src-two")
+            _write_lint_page(
+                root,
+                "wiki/preferences/direct-updates.md",
+                "Direct Updates",
+                source_id="src-one",
+                related=("wiki/preferences/validation-updates.md",),
+                last_observed_at="2026-01-01T00:00:00Z",
+                stale_after="P30D",
+            )
+            _write_lint_page(
+                root,
+                "wiki/preferences/validation-updates.md",
+                "Validation Updates",
+                source_id="src-two",
+            )
+            (root / "index.md").write_text(
+                "# User Memory Index\n\n"
+                "## Preferences\n\n"
+                "- [Direct Updates](wiki/preferences/direct-updates.md) - confirmed; confidence: high\n",
+                encoding="utf-8",
+            )
+
+            report = lint_user_memory(
+                WikiLintOptions(
+                    root=root,
+                    owner_user="user-test",
+                    as_of=datetime(2026, 5, 21, 0, 0, tzinfo=timezone.utc),
+                    apply=True,
+                )
+            )
+
+            direct_page = (root / "wiki" / "preferences" / "direct-updates.md").read_text()
+            validation_page = (root / "wiki" / "preferences" / "validation-updates.md").read_text()
+            index = (root / "index.md").read_text()
+            log = (root / "log.md").read_text()
+
+        self.assertIn("status: stale", direct_page)
+        self.assertIn("review_status: needs_user_review", direct_page)
+        self.assertIn("- wiki/preferences/direct-updates.md", validation_page)
+        self.assertIn("Validation Updates", index)
+        self.assertIn("lint/consolidation pass", log)
+        applied_actions = {fix.action for fix in report.safe_fixes if fix.applied}
+        self.assertIn("rebuild_index", applied_actions)
+        self.assertIn("add_backlink", applied_actions)
+        self.assertIn("mark_stale", applied_actions)
+        self.assertIn("append_log", applied_actions)
+
+
 def _options(root: Path, channel: str = "codex") -> IngestOptions:
     return IngestOptions(
         root=root,
@@ -306,6 +449,88 @@ def _options(root: Path, channel: str = "codex") -> IngestOptions:
         captured_at=CAPTURED_AT,
         source_retention=SourceRetention.HASH_ONLY,
     )
+
+
+def _write_manifest(root: Path, *source_ids: str) -> None:
+    manifest = root / "raw" / "manifest.jsonl"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for source_id in source_ids:
+        lines.append(
+            '{"path": "raw/redactions/%s.json", "sensitivity": "private", "source_id": "%s"}'
+            % (source_id, source_id)
+        )
+    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_lint_page(
+    root: Path,
+    relative_path: str,
+    title: str,
+    page_type: str = "preference",
+    source_id: str = "src-one",
+    status: str = "active",
+    memory_state: str = "confirmed",
+    review_status: str = "user_confirmed",
+    related: tuple = (),
+    contradictions: tuple = (),
+    corrections: tuple = (),
+    include_confidence: bool = True,
+    include_source_refs: bool = True,
+    last_observed_at: str = "2026-05-01T00:00:00Z",
+    stale_after: str = "P90D",
+    body: str = "User prefers direct updates.",
+) -> None:
+    path = root / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "---",
+        "id: mem-{}".format(relative_path.replace("/", "-").replace(".md", "")),
+        "title: {}".format(title),
+        "page_type: {}".format(page_type),
+        "owner_user: user-test",
+        "status: {}".format(status),
+        "memory_state: {}".format(memory_state),
+    ]
+    if include_confidence:
+        lines.extend(["confidence:", "  level: high", "  score: 0.90"])
+    lines.extend(
+        [
+            "sensitivity: private",
+            "prompt_visibility: task_only",
+            "review_status: {}".format(review_status),
+            "created_at: 2026-05-01T00:00:00Z",
+            "updated_at: 2026-05-01T00:00:00Z",
+            "last_observed_at: {}".format(last_observed_at),
+            "last_confirmed_at: 2026-05-01T00:00:00Z",
+            "stale_after: {}".format(stale_after),
+        ]
+    )
+    if include_source_refs:
+        lines.extend(
+            [
+                "source_refs:",
+                "  - source_id: {}".format(source_id),
+                "    path: raw/redactions/{}.json".format(source_id),
+                "    locator: message:1",
+                "    claim: {}".format(body),
+                "    support: explicit",
+                "    excerpt_hash: sha256:test",
+            ]
+        )
+    lines.extend(_test_yaml_list("related", related))
+    lines.extend(_test_yaml_list("supersedes", ()))
+    lines.extend(_test_yaml_list("superseded_by", ()))
+    lines.extend(_test_yaml_list("contradictions", contradictions))
+    lines.extend(_test_yaml_list("corrections", corrections))
+    lines.extend(["tags: [test]", "---", "", "# {}".format(title), "", body, ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _test_yaml_list(key: str, values: tuple) -> list:
+    if not values:
+        return ["{}: []".format(key)]
+    return ["{}:".format(key)] + ["  - {}".format(value) for value in values]
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
@@ -16,6 +16,10 @@ from .models import TelegramTask
 
 class UserMemoryIngestError(RuntimeError):
     """Raised when a user-memory ingest cannot be planned or applied."""
+
+
+class UserMemoryLintError(RuntimeError):
+    """Raised when a user-memory lint/consolidation pass cannot be planned."""
 
 
 class PageType(str, Enum):
@@ -53,6 +57,15 @@ class UserMemoryTaskType(str, Enum):
     SOCIAL_COORDINATION = "social_coordination"
     CORRECTION_HANDLING = "correction_handling"
     MEMORY_MAINTENANCE = "memory_maintenance"
+
+
+class RelationshipType(str, Enum):
+    SIMILAR_TO = "similar-to"
+    CONTAINS = "contains"
+    CONTRADICTS = "contradicts"
+    REFINES = "refines"
+    DEPENDS_ON = "depends-on"
+    EXAMPLE_OF = "example-of"
 
 
 PAGE_DIRECTORIES: Mapping[PageType, str] = {
@@ -131,6 +144,60 @@ HIGH_STAKES_TASK_RE = re.compile(
     r"\b(delete|publish|send|email|sign|pay|buy|sell|transfer|legal|medical|"
     r"financial|finance|fire|hire|irreversible|credential|password|token|secret)\b",
     re.IGNORECASE,
+)
+
+REQUIRED_WIKI_FRONTMATTER_FIELDS = (
+    "id",
+    "title",
+    "page_type",
+    "owner_user",
+    "status",
+    "memory_state",
+    "confidence_level",
+    "confidence_score",
+    "sensitivity",
+    "prompt_visibility",
+    "review_status",
+    "created_at",
+    "updated_at",
+    "last_observed_at",
+    "last_confirmed_at",
+    "stale_after",
+    "source_refs",
+    "related",
+    "supersedes",
+    "superseded_by",
+    "contradictions",
+    "corrections",
+    "tags",
+)
+
+WIKI_STATUS_VALUES = {"active", "draft", "contested", "stale", "archived", "deleted"}
+WIKI_MEMORY_STATE_VALUES = {
+    "confirmed",
+    "inferred",
+    "observed_pattern",
+    "open_question",
+    "correction",
+    "retracted",
+}
+WIKI_CONFIDENCE_LEVELS = {"high", "medium", "low"}
+WIKI_SENSITIVITY_VALUES = {"public", "internal", "private", "restricted", "secret"}
+WIKI_PROMPT_VISIBILITY_VALUES = {"safe", "task_only", "confirm_first", "never"}
+WIKI_REVIEW_STATUS_VALUES = {
+    "unreviewed",
+    "llm_reviewed",
+    "user_confirmed",
+    "needs_user_review",
+    "disputed",
+    "deletion_pending",
+}
+WIKI_RELATIONSHIP_LIST_FIELDS = (
+    "related",
+    "supersedes",
+    "superseded_by",
+    "contradictions",
+    "corrections",
 )
 
 
@@ -312,6 +379,179 @@ class IngestOptions:
     captured_at: Optional[datetime] = None
     source_retention: SourceRetention = SourceRetention.HASH_ONLY
     consent_scope: str = "store"
+
+
+@dataclass(frozen=True)
+class WikiLintOptions:
+    """Options for a user-memory wiki lint/consolidation pass."""
+
+    root: Path
+    owner_user: Optional[str] = None
+    as_of: Optional[datetime] = None
+    apply: bool = False
+
+
+@dataclass(frozen=True)
+class WikiLintIssue:
+    """One concrete lint finding."""
+
+    category: str
+    severity: str
+    path: str
+    message: str
+    details: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WikiDuplicateCandidate:
+    """A duplicate/consolidation candidate that requires review."""
+
+    paths: Tuple[str, str]
+    reason: str
+    confidence: float
+
+
+@dataclass(frozen=True)
+class WikiRelationshipSuggestion:
+    """Suggested explicit relationship type for a generic wiki link."""
+
+    source_path: str
+    target_path: str
+    suggested_type: RelationshipType
+    reason: str
+
+
+@dataclass(frozen=True)
+class WikiReviewItem:
+    """Judgment-requiring consolidation work item."""
+
+    category: str
+    path: str
+    summary: str
+    context: Tuple[str, ...]
+    alternatives: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WikiSafeFix:
+    """A mechanical fix that lint may apply in controlled mode."""
+
+    action: str
+    path: str
+    description: str
+    applied: bool = False
+
+
+@dataclass(frozen=True)
+class WikiPageRecord:
+    """A raw wiki page plus parsed metadata used for linting."""
+
+    path: Path
+    relative_path: str
+    frontmatter: Optional[str]
+    metadata: Mapping[str, object]
+    body_text: str
+    page: Optional[UserMemoryPage]
+
+
+@dataclass(frozen=True)
+class WikiLintReport:
+    """Reviewable report for one lint/consolidation pass."""
+
+    root: Path
+    as_of: datetime
+    apply: bool
+    issues: Tuple[WikiLintIssue, ...]
+    duplicate_candidates: Tuple[WikiDuplicateCandidate, ...]
+    orphan_pages: Tuple[str, ...]
+    stale_pages: Tuple[str, ...]
+    missing_metadata: Tuple[WikiLintIssue, ...]
+    unresolved_contradictions: Tuple[WikiLintIssue, ...]
+    relationship_type_suggestions: Tuple[WikiRelationshipSuggestion, ...]
+    review_items: Tuple[WikiReviewItem, ...]
+    safe_fixes: Tuple[WikiSafeFix, ...]
+
+    @property
+    def has_findings(self) -> bool:
+        return bool(
+            self.issues
+            or self.duplicate_candidates
+            or self.orphan_pages
+            or self.stale_pages
+            or self.relationship_type_suggestions
+            or self.review_items
+            or self.safe_fixes
+        )
+
+    def format_human_readable(self) -> str:
+        mode = "apply" if self.apply else "dry-run"
+        lines = [
+            "User memory lint/consolidation report ({})".format(mode),
+            "root: {}".format(self.root),
+            "as_of: {}".format(_format_dt(self.as_of)),
+            "issues: {}".format(len(self.issues)),
+            "safe_fixes: {}".format(len(self.safe_fixes)),
+            "review_items: {}".format(len(self.review_items)),
+            "",
+        ]
+        _format_report_section(
+            lines,
+            "Duplicate candidates",
+            (
+                "- {} <-> {} (confidence {:.2f}): {}".format(
+                    item.paths[0],
+                    item.paths[1],
+                    item.confidence,
+                    item.reason,
+                )
+                for item in self.duplicate_candidates
+            ),
+        )
+        _format_report_section(lines, "Orphan pages", ("- {}".format(path) for path in self.orphan_pages))
+        _format_report_section(lines, "Stale pages", ("- {}".format(path) for path in self.stale_pages))
+        _format_report_section(
+            lines,
+            "Missing metadata",
+            ("- {}: {}".format(item.path, item.message) for item in self.missing_metadata),
+        )
+        _format_report_section(
+            lines,
+            "Unresolved contradictions",
+            ("- {}: {}".format(item.path, item.message) for item in self.unresolved_contradictions),
+        )
+        _format_report_section(
+            lines,
+            "Relationship type suggestions",
+            (
+                "- {} -> {}: {} ({})".format(
+                    item.source_path,
+                    item.target_path,
+                    item.suggested_type.value,
+                    item.reason,
+                )
+                for item in self.relationship_type_suggestions
+            ),
+        )
+        _format_report_section(
+            lines,
+            "Safe mechanical fixes",
+            (
+                "- {} {}: {}".format(
+                    "applied" if item.applied else "proposed",
+                    item.path,
+                    item.description,
+                )
+                for item in self.safe_fixes
+            ),
+        )
+        _format_report_section(
+            lines,
+            "Review items",
+            (_format_review_item(item) for item in self.review_items),
+        )
+        if not self.apply:
+            lines.extend(["", "Dry-run only: no files were mutated."])
+        return "\n".join(lines).rstrip() + "\n"
 
 
 @dataclass(frozen=True)
@@ -808,6 +1048,867 @@ def ingest_user_memory(
     return apply_ingest_plan(plan)
 
 
+def lint_user_memory(options: WikiLintOptions) -> WikiLintReport:
+    """Plan, and optionally apply, a deterministic user-memory wiki lint pass."""
+
+    report = plan_user_memory_lint(options)
+    if not options.apply:
+        return report
+    return apply_user_memory_lint(report, options)
+
+
+def plan_user_memory_lint(options: WikiLintOptions) -> WikiLintReport:
+    """Create a reviewable user-memory lint/consolidation report without mutating files."""
+
+    root = options.root.expanduser().resolve()
+    as_of = (options.as_of or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    records = _load_wiki_page_records(root)
+    records_by_path = {record.relative_path: record for record in records}
+    index_paths = set(_index_relative_paths(root))
+    inbound_refs = _inbound_wiki_references(root, records)
+    manifest_sources = _manifest_sources(root)
+
+    issues: List[WikiLintIssue] = []
+    missing_metadata: List[WikiLintIssue] = []
+    unresolved_contradictions: List[WikiLintIssue] = []
+    stale_pages: List[str] = []
+    orphan_pages: List[str] = []
+    safe_fixes: List[WikiSafeFix] = []
+    review_items: List[WikiReviewItem] = []
+
+    for record in records:
+        metadata_issues = _metadata_lint_issues(record)
+        missing_metadata.extend(metadata_issues)
+        issues.extend(metadata_issues)
+        source_issues = _source_ref_lint_issues(record, root, manifest_sources)
+        issues.extend(source_issues)
+        if _is_prompt_eligible_secret(record, manifest_sources):
+            issues.append(
+                WikiLintIssue(
+                    category="source-safety",
+                    severity="error",
+                    path=record.relative_path,
+                    message="Prompt-eligible page cites a secret source.",
+                    details=("Set prompt_visibility to `never` or remove the secret source citation.",),
+                )
+            )
+        if _is_stale_record(record, as_of):
+            stale_pages.append(record.relative_path)
+            issues.append(
+                WikiLintIssue(
+                    category="stale",
+                    severity="warning",
+                    path=record.relative_path,
+                    message="Page is older than its stale_after window.",
+                    details=("Apply mode can mark the page stale without rewriting the claim.",),
+                )
+            )
+            safe_fixes.append(
+                WikiSafeFix(
+                    action="mark_stale",
+                    path=record.relative_path,
+                    description="Set status to `stale` and review_status to `needs_user_review`.",
+                )
+            )
+        if _is_unresolved_contradiction(record, root):
+            issue = WikiLintIssue(
+                category="contradiction",
+                severity="warning",
+                path=record.relative_path,
+                message="Contradiction is unresolved and must remain reviewable.",
+                details=("Do not smooth this into a consolidated claim without explicit review.",),
+            )
+            unresolved_contradictions.append(issue)
+            issues.append(issue)
+            review_items.append(
+                WikiReviewItem(
+                    category="contradiction",
+                    path=record.relative_path,
+                    summary="Resolve or preserve contested memory.",
+                    context=_review_context(record),
+                    alternatives=(
+                        "Keep both claims visible and add/confirm review/contradictions.md context.",
+                        "Resolve only with explicit user correction or reviewer decision.",
+                    ),
+                )
+            )
+        if record.page is not None and record.page.status == "active" and record.relative_path not in index_paths:
+            safe_fixes.append(
+                WikiSafeFix(
+                    action="rebuild_index",
+                    path="index.md",
+                    description="Rebuild index.md so active page {} is indexed.".format(
+                        record.relative_path
+                    ),
+                )
+            )
+        if _is_orphan_record(record, index_paths, inbound_refs):
+            orphan_pages.append(record.relative_path)
+            issues.append(
+                WikiLintIssue(
+                    category="orphan",
+                    severity="warning",
+                    path=record.relative_path,
+                    message="Active page has no index entry or inbound wiki references.",
+                    details=("Archive, link, or explicitly keep after review.",),
+                )
+            )
+            review_items.append(
+                WikiReviewItem(
+                    category="orphan",
+                    path=record.relative_path,
+                    summary="Decide whether this page should be linked, archived, or kept as standalone memory.",
+                    context=_review_context(record),
+                    alternatives=(
+                        "Link it from a relevant higher-level page and rebuild the index.",
+                        "Archive it if it is no longer useful.",
+                        "Keep it standalone only with an explicit review note.",
+                    ),
+                )
+            )
+
+    duplicate_candidates = _duplicate_candidates(records)
+    for duplicate in duplicate_candidates:
+        review_items.append(
+            WikiReviewItem(
+                category="duplicate",
+                path=", ".join(duplicate.paths),
+                summary="Review duplicate/consolidation candidate.",
+                context=(duplicate.reason,),
+                alternatives=(
+                    "Merge pages while preserving all source_refs and correction links.",
+                    "Keep separate and add distinguishing relationship/context notes.",
+                ),
+            )
+        )
+
+    relationship_suggestions = _relationship_type_suggestions(records_by_path)
+    for suggestion in relationship_suggestions:
+        review_items.append(
+            WikiReviewItem(
+                category="relationship",
+                path=suggestion.source_path,
+                summary="Replace generic `related` meaning with explicit `{}` relationship.".format(
+                    suggestion.suggested_type.value
+                ),
+                context=(
+                    "{} links to {} via generic `related`.".format(
+                        suggestion.source_path,
+                        suggestion.target_path,
+                    ),
+                    suggestion.reason,
+                ),
+                alternatives=(
+                    "Record the relationship as `{}` in a review/apply proposal.".format(
+                        suggestion.suggested_type.value
+                    ),
+                    "Leave as generic only if the typed relationship is genuinely ambiguous.",
+                ),
+            )
+        )
+
+    concept_level_items = _concept_level_review_items(records)
+    review_items.extend(concept_level_items)
+    for item in concept_level_items:
+        issues.append(
+            WikiLintIssue(
+                category="concept-level",
+                severity="info",
+                path=item.path,
+                message=item.summary,
+                details=item.alternatives,
+            )
+        )
+
+    missing_backlink_fixes = _missing_backlink_fixes(records_by_path)
+    safe_fixes.extend(missing_backlink_fixes)
+    if any(fix.action in {"rebuild_index", "add_backlink", "mark_stale"} for fix in safe_fixes):
+        safe_fixes.append(
+            WikiSafeFix(
+                action="append_log",
+                path="log.md",
+                description="Append lint/consolidation activity with issue, review, and fix counts.",
+            )
+        )
+
+    safe_fixes = _dedupe_safe_fixes(safe_fixes)
+    return WikiLintReport(
+        root=root,
+        as_of=as_of,
+        apply=False,
+        issues=tuple(issues),
+        duplicate_candidates=tuple(duplicate_candidates),
+        orphan_pages=tuple(sorted(set(orphan_pages))),
+        stale_pages=tuple(sorted(set(stale_pages))),
+        missing_metadata=tuple(missing_metadata),
+        unresolved_contradictions=tuple(unresolved_contradictions),
+        relationship_type_suggestions=tuple(relationship_suggestions),
+        review_items=tuple(review_items),
+        safe_fixes=tuple(safe_fixes),
+    )
+
+
+def apply_user_memory_lint(report: WikiLintReport, options: WikiLintOptions) -> WikiLintReport:
+    """Apply only the high-confidence mechanical fixes from a lint report."""
+
+    root = report.root
+    owner_user = options.owner_user or _owner_user_from_records(_load_wiki_page_records(root)) or "default"
+    applied: List[WikiSafeFix] = []
+    rebuild_needed = False
+    log_needed = False
+    for fix in report.safe_fixes:
+        if fix.action == "rebuild_index":
+            rebuild_needed = True
+            applied.append(replace(fix, applied=True))
+        elif fix.action == "add_backlink":
+            target_path, field, source_path = _parse_backlink_fix(fix)
+            if target_path is not None and field is not None and source_path is not None:
+                _append_frontmatter_list_value(root / target_path, field, source_path)
+                applied.append(replace(fix, applied=True))
+        elif fix.action == "mark_stale":
+            page_path = root / fix.path
+            if page_path.exists():
+                content = page_path.read_text(encoding="utf-8")
+                content = _replace_frontmatter_scalar(content, "status", "stale")
+                content = _replace_frontmatter_scalar(content, "review_status", "needs_user_review")
+                page_path.write_text(content, encoding="utf-8")
+                applied.append(replace(fix, applied=True))
+        elif fix.action == "append_log":
+            log_needed = True
+    if rebuild_needed:
+        _rebuild_index(root, owner_user)
+    if log_needed:
+        _append_lint_log(
+            root=root,
+            as_of=report.as_of,
+            issue_count=len(report.issues),
+            review_count=len(report.review_items),
+            applied_fix_count=len(applied),
+        )
+        applied.append(
+            WikiSafeFix(
+                action="append_log",
+                path="log.md",
+                description="Append lint/consolidation activity with issue, review, and fix counts.",
+                applied=True,
+            )
+        )
+    applied_keys = {(fix.action, fix.path, fix.description) for fix in applied}
+    safe_fixes = tuple(
+        replace(fix, applied=True)
+        if (fix.action, fix.path, fix.description) in applied_keys
+        else fix
+        for fix in report.safe_fixes
+    )
+    if log_needed and not any(fix.action == "append_log" and fix.applied for fix in safe_fixes):
+        safe_fixes = safe_fixes + (applied[-1],)
+    return replace(report, apply=True, safe_fixes=safe_fixes)
+
+
+def _load_wiki_page_records(root: Path) -> Tuple[WikiPageRecord, ...]:
+    wiki_root = root / "wiki"
+    if not wiki_root.exists() or not wiki_root.is_dir():
+        return ()
+    records: List[WikiPageRecord] = []
+    for path in sorted(wiki_root.glob("*/*.md")):
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        frontmatter, body = _split_frontmatter(content)
+        metadata = _parse_memory_frontmatter(frontmatter) if frontmatter is not None else {}
+        try:
+            relative_path = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            continue
+        records.append(
+            WikiPageRecord(
+                path=path,
+                relative_path=relative_path,
+                frontmatter=frontmatter,
+                metadata=metadata,
+                body_text=body,
+                page=_load_user_memory_page(path, root),
+            )
+        )
+    return tuple(records)
+
+
+def _index_relative_paths(root: Path) -> Tuple[str, ...]:
+    paths = []
+    for path in _paths_from_index(root / "index.md", root):
+        try:
+            paths.append(path.resolve().relative_to(root.resolve()).as_posix())
+        except ValueError:
+            continue
+    return tuple(paths)
+
+
+def _inbound_wiki_references(
+    root: Path,
+    records: Sequence[WikiPageRecord],
+) -> Mapping[str, Set[str]]:
+    inbound: Dict[str, Set[str]] = {}
+    for indexed_path in _index_relative_paths(root):
+        inbound.setdefault(indexed_path, set()).add("index.md")
+    for record in records:
+        for target in _record_wiki_references(record):
+            inbound.setdefault(target, set()).add(record.relative_path)
+    return inbound
+
+
+def _record_wiki_references(record: WikiPageRecord) -> Tuple[str, ...]:
+    refs: List[str] = []
+    for key in WIKI_RELATIONSHIP_LIST_FIELDS:
+        refs.extend(_metadata_string_tuple(record.metadata.get(key)))
+    refs.extend(re.findall(r"\]\((wiki/[^)]+\.md)\)", record.body_text))
+    return tuple(_normalize_wiki_ref(ref) for ref in refs if _normalize_wiki_ref(ref))
+
+
+def _metadata_lint_issues(record: WikiPageRecord) -> Tuple[WikiLintIssue, ...]:
+    issues: List[WikiLintIssue] = []
+    if record.frontmatter is None:
+        return (
+            WikiLintIssue(
+                category="metadata",
+                severity="error",
+                path=record.relative_path,
+                message="Page has no YAML frontmatter.",
+            ),
+        )
+    missing = []
+    for field in REQUIRED_WIKI_FRONTMATTER_FIELDS:
+        value = record.metadata.get(field)
+        if field == "source_refs":
+            if not value and record.metadata.get("status") != "deleted":
+                missing.append(field)
+        elif value is None:
+            missing.append(field)
+    if missing:
+        issues.append(
+            WikiLintIssue(
+                category="metadata",
+                severity="error",
+                path=record.relative_path,
+                message="Missing required metadata: {}".format(", ".join(missing)),
+                details=tuple(missing),
+            )
+        )
+    issues.extend(_metadata_type_issues(record))
+    return tuple(issues)
+
+
+def _metadata_type_issues(record: WikiPageRecord) -> Tuple[WikiLintIssue, ...]:
+    metadata = record.metadata
+    checks = (
+        ("page_type", {item.value for item in PageType}),
+        ("status", WIKI_STATUS_VALUES),
+        ("memory_state", WIKI_MEMORY_STATE_VALUES),
+        ("confidence_level", WIKI_CONFIDENCE_LEVELS),
+        ("sensitivity", WIKI_SENSITIVITY_VALUES),
+        ("prompt_visibility", WIKI_PROMPT_VISIBILITY_VALUES),
+        ("review_status", WIKI_REVIEW_STATUS_VALUES),
+    )
+    issues: List[WikiLintIssue] = []
+    for field, allowed in checks:
+        value = metadata.get(field)
+        if value is not None and value not in allowed:
+            issues.append(
+                WikiLintIssue(
+                    category="metadata",
+                    severity="error",
+                    path=record.relative_path,
+                    message="Invalid {} metadata value `{}`.".format(field, value),
+                    details=("Allowed: {}".format(", ".join(sorted(allowed))),),
+                )
+            )
+    score = metadata.get("confidence_score")
+    if score is not None:
+        numeric_score = _optional_float_text(score)
+        if numeric_score is None or numeric_score < 0.0 or numeric_score > 1.0:
+            issues.append(
+                WikiLintIssue(
+                    category="metadata",
+                    severity="error",
+                    path=record.relative_path,
+                    message="confidence.score must be a number between 0.0 and 1.0.",
+                )
+            )
+    for field in ("created_at", "updated_at", "last_observed_at"):
+        if metadata.get(field) and not _is_valid_datetime_or_null(str(metadata[field]), allow_null=False):
+            issues.append(
+                WikiLintIssue(
+                    category="metadata",
+                    severity="error",
+                    path=record.relative_path,
+                    message="{} must be an ISO-8601 timestamp.".format(field),
+                )
+            )
+    if metadata.get("last_confirmed_at") and not _is_valid_datetime_or_null(
+        str(metadata["last_confirmed_at"]),
+        allow_null=True,
+    ):
+        issues.append(
+            WikiLintIssue(
+                category="metadata",
+                severity="error",
+                path=record.relative_path,
+                message="last_confirmed_at must be an ISO-8601 timestamp or null.",
+            )
+        )
+    stale_after = metadata.get("stale_after")
+    if stale_after and _parse_duration_days(str(stale_after)) is None:
+        issues.append(
+            WikiLintIssue(
+                category="metadata",
+                severity="error",
+                path=record.relative_path,
+                message="stale_after must be an ISO-8601 day duration such as P90D.",
+            )
+        )
+    return tuple(issues)
+
+
+def _source_ref_lint_issues(
+    record: WikiPageRecord,
+    root: Path,
+    manifest_sources: Mapping[str, Mapping[str, object]],
+) -> Tuple[WikiLintIssue, ...]:
+    issues: List[WikiLintIssue] = []
+    for ref in _metadata_source_refs(record.metadata):
+        if ref.source_id in manifest_sources:
+            continue
+        if ref.path and (root / ref.path).exists():
+            continue
+        issues.append(
+            WikiLintIssue(
+                category="provenance",
+                severity="warning",
+                path=record.relative_path,
+                message="source_ref `{}` does not resolve to raw/manifest.jsonl or a tombstone file.".format(
+                    ref.source_id
+                ),
+                details=(ref.path or "",),
+            )
+        )
+    return tuple(issues)
+
+
+def _metadata_source_refs(metadata: Mapping[str, object]) -> Tuple[UserMemorySourceRef, ...]:
+    refs = metadata.get("source_refs")
+    if not isinstance(refs, tuple):
+        return ()
+    return tuple(ref for ref in refs if isinstance(ref, UserMemorySourceRef))
+
+
+def _manifest_sources(root: Path) -> Mapping[str, Mapping[str, object]]:
+    path = root / "raw" / "manifest.jsonl"
+    if not path.exists():
+        return {}
+    sources: Dict[str, Mapping[str, object]] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return sources
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, Mapping) and isinstance(payload.get("source_id"), str):
+            sources[str(payload["source_id"])] = payload
+    return sources
+
+
+def _is_prompt_eligible_secret(
+    record: WikiPageRecord,
+    manifest_sources: Mapping[str, Mapping[str, object]],
+) -> bool:
+    prompt_visibility = str(record.metadata.get("prompt_visibility") or "")
+    if prompt_visibility == "never":
+        return False
+    for ref in _metadata_source_refs(record.metadata):
+        source = manifest_sources.get(ref.source_id)
+        if source is not None and source.get("sensitivity") == "secret":
+            return True
+    return False
+
+
+def _is_stale_record(record: WikiPageRecord, as_of: datetime) -> bool:
+    if record.metadata.get("status") != "active":
+        return False
+    stale_after = record.metadata.get("stale_after")
+    last_observed = record.metadata.get("last_observed_at") or record.metadata.get("updated_at")
+    if not isinstance(stale_after, str) or not isinstance(last_observed, str):
+        return False
+    duration_days = _parse_duration_days(stale_after)
+    if duration_days is None:
+        return False
+    try:
+        observed_at = parse_datetime(last_observed)
+    except UserMemoryIngestError:
+        return False
+    return observed_at + timedelta(days=duration_days) < as_of
+
+
+def _parse_duration_days(value: str) -> Optional[int]:
+    match = re.fullmatch(r"P(?P<days>\d+)D", value.strip())
+    if not match:
+        return None
+    return int(match.group("days"))
+
+
+def _is_unresolved_contradiction(record: WikiPageRecord, root: Path) -> bool:
+    if record.metadata.get("status") == "contested" or record.metadata.get("review_status") == "disputed":
+        return True
+    if _metadata_string_tuple(record.metadata.get("contradictions")):
+        return True
+    review_path = root / "review" / "contradictions.md"
+    if not review_path.exists():
+        return False
+    try:
+        return record.relative_path in review_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def _is_orphan_record(
+    record: WikiPageRecord,
+    index_paths: Set[str],
+    inbound_refs: Mapping[str, Set[str]],
+) -> bool:
+    if record.page is None:
+        return False
+    if record.page.status not in {"active", "stale"}:
+        return False
+    if record.relative_path in index_paths:
+        return False
+    inbound = inbound_refs.get(record.relative_path, set())
+    return not inbound
+
+
+def _duplicate_candidates(records: Sequence[WikiPageRecord]) -> Tuple[WikiDuplicateCandidate, ...]:
+    candidates: List[WikiDuplicateCandidate] = []
+    active = [record for record in records if record.page is not None and record.page.status != "deleted"]
+    for left_index, left in enumerate(active):
+        for right in active[left_index + 1 :]:
+            if left.page is None or right.page is None:
+                continue
+            if left.page.page_type != right.page.page_type:
+                continue
+            reason = ""
+            confidence = 0.0
+            if _normalize_claim(left.page.title) == _normalize_claim(right.page.title):
+                reason = "same normalized title"
+                confidence = 0.95
+            else:
+                similarity = _page_similarity(left.page, right.page)
+                if similarity >= 0.62:
+                    reason = "high title/body token overlap"
+                    confidence = min(0.90, similarity)
+            if reason:
+                candidates.append(
+                    WikiDuplicateCandidate(
+                        paths=(left.relative_path, right.relative_path),
+                        reason=reason,
+                        confidence=confidence,
+                    )
+                )
+    return tuple(candidates)
+
+
+def _page_similarity(left: UserMemoryPage, right: UserMemoryPage) -> float:
+    left_tokens = _tokenize_for_retrieval("{} {}".format(left.title, left.summary))
+    right_tokens = _tokenize_for_retrieval("{} {}".format(right.title, right.summary))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / float(len(left_tokens | right_tokens))
+
+
+def _relationship_type_suggestions(
+    records_by_path: Mapping[str, WikiPageRecord],
+) -> Tuple[WikiRelationshipSuggestion, ...]:
+    suggestions: List[WikiRelationshipSuggestion] = []
+    for source_path, source in sorted(records_by_path.items()):
+        for target_path in _metadata_string_tuple(source.metadata.get("related")):
+            normalized_target = _normalize_wiki_ref(target_path)
+            target = records_by_path.get(normalized_target)
+            if target is None:
+                continue
+            relationship, reason = _suggest_relationship_type(source, target)
+            suggestions.append(
+                WikiRelationshipSuggestion(
+                    source_path=source_path,
+                    target_path=normalized_target,
+                    suggested_type=relationship,
+                    reason=reason,
+                )
+            )
+    return tuple(suggestions)
+
+
+def _suggest_relationship_type(
+    source: WikiPageRecord,
+    target: WikiPageRecord,
+) -> Tuple[RelationshipType, str]:
+    source_type = source.page.page_type if source.page is not None else None
+    target_type = target.page.page_type if target.page is not None else None
+    combined = "{} {}".format(source.body_text, target.body_text).lower()
+    if source_type == PageType.CORRECTION or target_type == PageType.CORRECTION:
+        return RelationshipType.CONTRADICTS, "correction pages preserve contradictions/refinements explicitly"
+    if source_type == PageType.OBSERVATION and target_type in {PageType.PREFERENCE, PageType.VALUE}:
+        return RelationshipType.EXAMPLE_OF, "observations are evidence examples for stronger synthesized pages"
+    if source_type in {PageType.PREFERENCE, PageType.VALUE} and target_type == PageType.OBSERVATION:
+        return RelationshipType.CONTAINS, "higher-level memory contains lower-level observations as evidence"
+    if source_type == PageType.OPEN_QUESTION or target_type == PageType.OPEN_QUESTION:
+        return RelationshipType.DEPENDS_ON, "open questions block confident use until resolved"
+    if "instead" in combined or "not " in combined or "rather than" in combined:
+        return RelationshipType.CONTRADICTS, "text contains corrective or negative contrast language"
+    if source.page is not None and target.page is not None and _page_similarity(source.page, target.page) >= 0.45:
+        return RelationshipType.SIMILAR_TO, "linked pages have overlapping titles or summaries"
+    if source_type == PageType.CONCEPT or target_type == PageType.CONCEPT:
+        return RelationshipType.REFINES, "concept links usually refine the meaning of related memory"
+    return RelationshipType.REFINES, "generic `related` link should be reviewed for typed relationship semantics"
+
+
+def _concept_level_review_items(records: Sequence[WikiPageRecord]) -> Tuple[WikiReviewItem, ...]:
+    items: List[WikiReviewItem] = []
+    for record in records:
+        if record.page is None or record.page.status == "deleted":
+            continue
+        text = "{} {}".format(record.page.title, record.body_text).lower()
+        suggested: Optional[str] = None
+        reason: Optional[str] = None
+        if record.page.page_type == PageType.PREFERENCE and re.search(
+            r"\b(value|principle|identity|agency|long[- ]term|durable)\b",
+            text,
+        ):
+            suggested = "value"
+            reason = "preference page uses life-scale or user-defining language"
+        elif record.page.page_type == PageType.VALUE and re.search(
+            r"\b(status|format|tool|command|keyboard|theme|update|temporary|this task)\b",
+            text,
+        ):
+            suggested = "preference"
+            reason = "value page appears to describe tactical operating style"
+        elif record.page.page_type in {PageType.VALUE, PageType.PREFERENCE} and re.search(
+            r"\b(one[- ]off|one time|this task|temporary)\b",
+            text,
+        ):
+            suggested = "observation"
+            reason = "durable page appears to describe a one-off observation"
+        elif record.page.page_type == PageType.OBSERVATION and len(record.page.source_refs) >= 2:
+            suggested = "preference or value"
+            reason = "observation has repeated evidence and may be ready for synthesis"
+        if suggested is None or reason is None:
+            continue
+        items.append(
+            WikiReviewItem(
+                category="concept-level",
+                path=record.relative_path,
+                summary="Review concept level; suggested type: {}.".format(suggested),
+                context=(reason,),
+                alternatives=(
+                    "Keep current page type and add scope text explaining why.",
+                    "Move/split into {} while preserving provenance and backlinks.".format(suggested),
+                ),
+            )
+        )
+    return tuple(items)
+
+
+def _missing_backlink_fixes(
+    records_by_path: Mapping[str, WikiPageRecord],
+) -> Tuple[WikiSafeFix, ...]:
+    fixes: List[WikiSafeFix] = []
+    for source_path, source in sorted(records_by_path.items()):
+        for field in WIKI_RELATIONSHIP_LIST_FIELDS:
+            for target_path in _metadata_string_tuple(source.metadata.get(field)):
+                normalized_target = _normalize_wiki_ref(target_path)
+                target = records_by_path.get(normalized_target)
+                if target is None:
+                    continue
+                target_refs = set()
+                for target_field in WIKI_RELATIONSHIP_LIST_FIELDS:
+                    target_refs.update(
+                        _normalize_wiki_ref(value)
+                        for value in _metadata_string_tuple(target.metadata.get(target_field))
+                    )
+                if source_path in target_refs:
+                    continue
+                backlink_field = _backlink_field_for(source, field)
+                fixes.append(
+                    WikiSafeFix(
+                        action="add_backlink",
+                        path=normalized_target,
+                        description="Add {} backlink to {} from {}.".format(
+                            backlink_field,
+                            normalized_target,
+                            source_path,
+                        ),
+                    )
+                )
+    return tuple(fixes)
+
+
+def _backlink_field_for(source: WikiPageRecord, field: str) -> str:
+    if field == "contradictions":
+        return "contradictions"
+    if field == "corrections":
+        return "corrections"
+    if source.page is not None and source.page.page_type == PageType.CORRECTION:
+        return "corrections"
+    return "related"
+
+
+def _dedupe_safe_fixes(fixes: Sequence[WikiSafeFix]) -> Tuple[WikiSafeFix, ...]:
+    deduped: Dict[Tuple[str, str, str], WikiSafeFix] = {}
+    for fix in fixes:
+        deduped.setdefault((fix.action, fix.path, fix.description), fix)
+    return tuple(deduped[key] for key in sorted(deduped))
+
+
+def _parse_backlink_fix(fix: WikiSafeFix) -> Tuple[Optional[Path], Optional[str], Optional[str]]:
+    match = re.search(r"Add (?P<field>[a-z_]+) backlink to (?P<target>wiki/[^ ]+\.md) from (?P<source>wiki/[^ ]+\.md)", fix.description)
+    if not match:
+        return None, None, None
+    return Path(match.group("target")), match.group("field"), match.group("source")
+
+
+def _append_frontmatter_list_value(path: Path, key: str, value: str) -> None:
+    if not path.exists():
+        return
+    content = path.read_text(encoding="utf-8")
+    updated = _frontmatter_list_value_appended(content, key, value)
+    if updated != content:
+        path.write_text(updated, encoding="utf-8")
+
+
+def _frontmatter_list_value_appended(content: str, key: str, value: str) -> str:
+    if not content.startswith("---\n"):
+        return content
+    end = content.find("\n---", 4)
+    if end == -1:
+        return content
+    frontmatter = content[:end]
+    rest = content[end:]
+    parsed = _parse_memory_frontmatter(frontmatter[4:])
+    current_values = _metadata_string_tuple(parsed.get(key))
+    if value in current_values:
+        return content
+    lines = frontmatter.splitlines()
+    key_index = None
+    for index, line in enumerate(lines):
+        if line.startswith("{}:".format(key)):
+            key_index = index
+            break
+    if key_index is None:
+        lines.append("{}:".format(key))
+        lines.append("  - {}".format(value))
+        return "\n".join(lines) + rest
+    line = lines[key_index]
+    if line.strip() == "{}: []".format(key):
+        lines[key_index] = "{}:".format(key)
+        lines.insert(key_index + 1, "  - {}".format(value))
+        return "\n".join(lines) + rest
+    if "[" in line and "]" in line:
+        values = list(current_values) + [value]
+        lines[key_index] = "{}: [{}]".format(key, ", ".join(values))
+        return "\n".join(lines) + rest
+    insert_at = key_index + 1
+    while insert_at < len(lines) and (not lines[insert_at] or lines[insert_at].startswith(" ")):
+        insert_at += 1
+    lines.insert(insert_at, "  - {}".format(value))
+    return "\n".join(lines) + rest
+
+
+def _append_lint_log(
+    root: Path,
+    as_of: datetime,
+    issue_count: int,
+    review_count: int,
+    applied_fix_count: int,
+) -> None:
+    path = root / "log.md"
+    existing = path.read_text(encoding="utf-8") if path.exists() else "# User Memory Log\n"
+    entry = (
+        "- {}: lint/consolidation pass; issues: {}; review_items: {}; "
+        "safe_fixes_applied: {}."
+    ).format(_format_dt(as_of), issue_count, review_count, applied_fix_count)
+    if entry in existing:
+        return
+    path.write_text(existing.rstrip() + "\n" + entry + "\n", encoding="utf-8")
+
+
+def _owner_user_from_records(records: Sequence[WikiPageRecord]) -> Optional[str]:
+    for record in records:
+        owner_user = record.metadata.get("owner_user")
+        if isinstance(owner_user, str) and owner_user:
+            return owner_user
+    return None
+
+
+def _review_context(record: WikiPageRecord) -> Tuple[str, ...]:
+    if record.page is None:
+        return (record.relative_path,)
+    return (
+        "title: {}".format(record.page.title),
+        "page_type: {}".format(record.page.page_type.value),
+        "memory_state: {}".format(record.page.memory_state),
+        "summary: {}".format(record.page.summary),
+    )
+
+
+def _format_report_section(lines: List[str], heading: str, items: Iterable[str]) -> None:
+    lines.append("{}:".format(heading))
+    rendered = [item for item in items if item]
+    if rendered:
+        lines.extend(rendered)
+    else:
+        lines.append("- none")
+    lines.append("")
+
+
+def _format_review_item(item: WikiReviewItem) -> str:
+    lines = ["- {}: {} ({})".format(item.category, item.summary, item.path)]
+    if item.context:
+        lines.append("  context: {}".format("; ".join(item.context)))
+    if item.alternatives:
+        lines.append("  alternatives: {}".format(" | ".join(item.alternatives)))
+    return "\n".join(lines)
+
+
+def _metadata_string_tuple(value: object) -> Tuple[str, ...]:
+    if isinstance(value, tuple):
+        return tuple(item for item in value if isinstance(item, str) and item)
+    if isinstance(value, list):
+        return tuple(item for item in value if isinstance(item, str) and item)
+    if isinstance(value, str) and value:
+        return (value,)
+    return ()
+
+
+def _normalize_wiki_ref(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    if text.startswith("./"):
+        text = text[2:]
+    return text
+
+
+def _is_valid_datetime_or_null(value: str, allow_null: bool) -> bool:
+    if allow_null and value in {"null", ""}:
+        return True
+    try:
+        parse_datetime(value)
+    except UserMemoryIngestError:
+        return False
+    return True
+
+
 def extract_memory_candidates(
     messages: Sequence[ConversationMessage],
     source_record: SourceRecord,
@@ -920,6 +2021,8 @@ def _parse_memory_frontmatter(frontmatter: str) -> Dict[str, object]:
     source_refs: List[UserMemorySourceRef] = []
     list_values: Dict[str, List[str]] = {
         "related": [],
+        "supersedes": [],
+        "superseded_by": [],
         "contradictions": [],
         "corrections": [],
         "tags": [],
