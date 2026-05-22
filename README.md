@@ -94,6 +94,81 @@ loads `VERA_CHAT_SESSION_STATE_PATH` and asks the app-server to resume the last
 known thread; if resume is unavailable, it safely starts a new thread while
 preserving Telegram authorization and local session mapping state.
 
+## Proactive Heartbeat
+
+Vera can run an opt-in heartbeat monitor beside Telegram polling. The heartbeat
+is disabled by default. When enabled, a separate monitor thread checks cadence
+and windowing state without blocking inbound Telegram polling, builds a compact
+metadata-only heartbeat context, routes the decision through the same Vera
+assistant identity and policy prompt used for Telegram tasks, and then either
+does nothing or prepares one owner-facing proactive message.
+
+The design adapts OpenClaw's
+[heartbeat pattern](https://openclawlab.com/en/docs/gateway/heartbeat/) rather
+than copying it directly: OpenClaw uses periodic turns in the main session,
+active-hours gating, a tiny optional `HEARTBEAT.md`, and a silent no-op
+contract. Vera keeps those durable ideas but maps them to Telegram and
+Symphony-managed state: explicit opt-in config, owner-chat allow-listing, JSON
+decisions, metadata-first event logs, quiet hours, daily initiation caps, and
+repeat-topic fingerprints.
+
+Example non-secret config:
+
+```json
+{
+  "heartbeat": {
+    "enabled": false,
+    "dry_run": true,
+    "interval_seconds": 21600,
+    "timezone": "America/Los_Angeles",
+    "quiet_hours": {
+      "start": "22:00",
+      "end": "08:00"
+    },
+    "max_daily_initiations": 2,
+    "owner_chat_id": 12345,
+    "state_path": "./runtime/heartbeat_state.json",
+    "repeat_cooldown_seconds": 86400,
+    "max_recent_topics": 20
+  }
+}
+```
+
+`dry_run: true` means Vera still runs the policy-governed decision and records a
+metadata event, but it does not call Telegram. It also updates heartbeat guard
+state as a simulation so repeated dry ticks do not produce identical would-send
+decisions. Set `dry_run: false` only after `owner_chat_id` is configured and
+included in `telegram.allowed_chat_ids`.
+
+The heartbeat decision can choose:
+
+- `do_nothing`
+- `ask_pending_question`
+- `follow_up_unresolved`
+- `lightweight_check_in`
+
+Only the configured `owner_chat_id` is used for proactive sends, and the
+Telegram message is sent through the same Bot API `sendMessage` path as regular
+responses, without `reply_to_message_id`.
+
+Heartbeat logs are metadata-first. They include decision action, reason
+category, dry-run/would-send/sent booleans, runtime status, and topic
+fingerprints. They do not include raw Telegram message text, owner profile
+details, user-memory page text, or the proactive message body.
+
+For a local dry heartbeat smoke:
+
+```sh
+PYTHONPATH=src python3 -m vera_harness --heartbeat-once
+```
+
+For live operation, use the normal monitor. If heartbeat is enabled, it starts
+the heartbeat thread automatically:
+
+```sh
+PYTHONPATH=src python3 -m vera_harness --monitor
+```
+
 `--poll-once` remains available for intake-only diagnostics. It performs one
 `getUpdates` call, queues accepted tasks, sends `Accepted: queued.`, and exits
 without launching Codex.

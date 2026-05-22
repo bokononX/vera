@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from vera_harness.codex import (
@@ -13,6 +14,7 @@ from vera_harness.codex import (
     CodexSessionMetadata,
 )
 from vera_harness.config import HarnessConfig
+from vera_harness.heartbeat import JsonHeartbeatStateStore, heartbeat_event_details
 from vera_harness.models import (
     HarnessRunStatus,
     OrchestrationDecision,
@@ -695,6 +697,184 @@ class TelegramChatSessionTests(unittest.TestCase):
             self.assertIn("missing codex", api.sent_messages[0]["text"])
             self.assertEqual(result.chat_turns[0].session.last_status, HarnessRunStatus.FAILED.value)
 
+
+class HeartbeatTests(unittest.TestCase):
+    def test_disabled_heartbeat_is_noop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = ScriptedChatRuntime((_heartbeat_response(),))
+            api = FakeTelegramApi(())
+            result = VeraHarness(_config(temp_dir)).run_heartbeat_tick(
+                runtime=runtime,
+                telegram_api=api,
+                now=_heartbeat_now(),
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(result.status.value, "disabled")
+            self.assertEqual(runtime.calls, 0)
+            self.assertEqual(api.sent_messages, [])
+
+    def test_dry_run_heartbeat_logs_decision_without_sending(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _heartbeat_config(temp_dir, {"VERA_HEARTBEAT_DRY_RUN": "true"})
+            runtime = ScriptedChatRuntime((_heartbeat_response(message="Quick check-in."),))
+            api = FakeTelegramApi(())
+
+            result = VeraHarness(config).run_heartbeat_tick(
+                runtime=runtime,
+                telegram_api=api,
+                now=_heartbeat_now(),
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(result.status.value, "decided")
+            self.assertTrue(result.would_send)
+            self.assertFalse(result.message_sent)
+            self.assertEqual(api.sent_messages, [])
+            self.assertIn("Heartbeat decision context:", runtime.prompts[0])
+            self.assertIn("CAT-131 operating principles:", runtime.prompts[0])
+            state = JsonHeartbeatStateStore(config.heartbeat.state_path).load()
+            self.assertEqual(state.daily_initiations, 1)
+            details = heartbeat_event_details(result)
+            self.assertEqual(details["reason_category"], "relationship_check_in")
+            self.assertNotIn("Quick check-in", str(details))
+
+    def test_quiet_hours_skip_without_runtime_call(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _heartbeat_config(
+                temp_dir,
+                {
+                    "VERA_HEARTBEAT_QUIET_HOURS_START": "08:00",
+                    "VERA_HEARTBEAT_QUIET_HOURS_END": "18:00",
+                },
+            )
+            runtime = ScriptedChatRuntime((_heartbeat_response(),))
+
+            result = VeraHarness(config).run_heartbeat_tick(
+                runtime=runtime,
+                now=_heartbeat_now(hour=12),
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(result.status.value, "skipped")
+            self.assertEqual(result.reason_category, "quiet_hours")
+            self.assertEqual(runtime.calls, 0)
+
+    def test_daily_limit_blocks_message_decision(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _heartbeat_config(
+                temp_dir,
+                {
+                    "VERA_HEARTBEAT_MAX_DAILY_INITIATIONS": "0",
+                    "VERA_HEARTBEAT_DRY_RUN": "false",
+                },
+            )
+            runtime = ScriptedChatRuntime((_heartbeat_response(),))
+            api = FakeTelegramApi(())
+
+            result = VeraHarness(config).run_heartbeat_tick(
+                runtime=runtime,
+                telegram_api=api,
+                now=_heartbeat_now(),
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(result.reason_category, "daily_limit")
+            self.assertFalse(result.would_send)
+            self.assertEqual(api.sent_messages, [])
+
+    def test_heartbeat_does_not_send_when_owner_user_is_not_authorized(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _heartbeat_config(
+                temp_dir,
+                {
+                    "VERA_ALLOWED_USER_IDS": "201",
+                    "VERA_HEARTBEAT_DRY_RUN": "false",
+                },
+            )
+            runtime = ScriptedChatRuntime((_heartbeat_response(),))
+            api = FakeTelegramApi(())
+
+            result = VeraHarness(config).run_heartbeat_tick(
+                runtime=runtime,
+                telegram_api=api,
+                now=_heartbeat_now(),
+                run_bootstrap=False,
+            )
+
+            self.assertEqual(result.reason_category, "owner_chat_unauthorized")
+            self.assertFalse(result.would_send)
+            self.assertEqual(api.sent_messages, [])
+
+    def test_send_and_do_nothing_decisions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _heartbeat_config(
+                temp_dir,
+                {"VERA_HEARTBEAT_DRY_RUN": "false"},
+            )
+            send_runtime = ScriptedChatRuntime((_heartbeat_response(message="Can I help close a loop?"),))
+            api = FakeTelegramApi(())
+
+            send_result = VeraHarness(config).run_heartbeat_tick(
+                runtime=send_runtime,
+                telegram_api=api,
+                now=_heartbeat_now(),
+                run_bootstrap=False,
+            )
+
+            self.assertTrue(send_result.message_sent)
+            self.assertEqual(api.sent_messages[0]["chat_id"], 100)
+            self.assertIsNone(api.sent_messages[0]["reply_to_message_id"])
+            self.assertEqual(api.sent_messages[0]["text"], "Can I help close a loop?")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _heartbeat_config(temp_dir)
+            noop_runtime = ScriptedChatRuntime(
+                (
+                    '{"action":"do_nothing","reason_category":"no_need","topic_key":null,"message":null}',
+                )
+            )
+            api = FakeTelegramApi(())
+
+            noop_result = VeraHarness(config).run_heartbeat_tick(
+                runtime=noop_runtime,
+                telegram_api=api,
+                now=_heartbeat_now(),
+                run_bootstrap=False,
+            )
+
+            self.assertFalse(noop_result.would_send)
+            self.assertEqual(noop_result.reason_category, "no_need")
+            self.assertEqual(api.sent_messages, [])
+
+    def test_repeat_guard_suppresses_identical_topic(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _heartbeat_config(temp_dir, {"VERA_HEARTBEAT_INTERVAL_SECONDS": "60"})
+            runtime = ScriptedChatRuntime(
+                (
+                    _heartbeat_response(topic_key="same-topic"),
+                    _heartbeat_response(topic_key="same-topic"),
+                )
+            )
+            harness = VeraHarness(config)
+
+            first = harness.run_heartbeat_tick(
+                runtime=runtime,
+                now=_heartbeat_now(hour=17, minute=0),
+                run_bootstrap=False,
+            )
+            second = harness.run_heartbeat_tick(
+                runtime=runtime,
+                now=_heartbeat_now(hour=17, minute=2),
+                run_bootstrap=False,
+            )
+
+            self.assertTrue(first.would_send)
+            self.assertEqual(second.reason_category, "repeat_guard")
+            self.assertFalse(second.would_send)
+            state = JsonHeartbeatStateStore(config.heartbeat.state_path).load()
+            self.assertEqual(state.daily_initiations, 1)
+
     def test_identity_interview_from_telegram_confirms_profile_and_updates_future_prompt(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = _config(
@@ -1005,6 +1185,50 @@ def _config(temp_dir, extra_env=None, owner_config=None):
     if extra_env:
         env.update(extra_env)
     return HarnessConfig.from_env(env, require_secrets=False, owner_config=owner_config)
+
+
+def _heartbeat_config(temp_dir, extra_env=None):
+    env = {
+        "VERA_ALLOWED_CHAT_IDS": "100",
+        "VERA_ALLOWED_USER_IDS": "200",
+        "VERA_HEARTBEAT_ENABLED": "true",
+        "VERA_HEARTBEAT_OWNER_CHAT_ID": "100",
+        "VERA_HEARTBEAT_STATE_PATH": str(Path(temp_dir, "heartbeat-state.json")),
+        "VERA_HEARTBEAT_TIMEZONE": "UTC",
+        "VERA_HEARTBEAT_QUIET_HOURS_START": "22:00",
+        "VERA_HEARTBEAT_QUIET_HOURS_END": "08:00",
+    }
+    if extra_env:
+        env.update(extra_env)
+    return _config(
+        temp_dir,
+        env,
+        owner_config={
+            "user_id": 200,
+            "display_name": "Vera Owner",
+            "communication_style": ["direct and concrete"],
+        },
+    )
+
+
+def _heartbeat_now(hour=17, minute=0):
+    return datetime(2026, 5, 22, hour, minute, tzinfo=timezone.utc)
+
+
+def _heartbeat_response(
+    action="lightweight_check_in",
+    reason_category="relationship_check_in",
+    topic_key="check-in",
+    message="Quick check-in?",
+):
+    return json.dumps(
+        {
+            "action": action,
+            "reason_category": reason_category,
+            "topic_key": topic_key,
+            "message": message,
+        }
+    )
 
 
 def _task():
