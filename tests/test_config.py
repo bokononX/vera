@@ -241,6 +241,190 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_state_path, state_path.resolve())
         self.assertEqual(config.telegram_unauthorized_response, "This chat is not authorized.")
 
+    def test_load_reads_multi_user_telegram_config_with_secret_refs_and_isolated_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            alice_root = Path(temp_dir, "alice")
+            bob_root = Path(temp_dir, "bob")
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "telegram": {
+                            "shared_chat_ids": [-1000],
+                            "api_base_url": "https://telegram.example.test",
+                            "users": [
+                                {
+                                    "id": "alice",
+                                    "bot_username": "alice_bot",
+                                    "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_ALICE",
+                                    "allowed_chat_ids": [101],
+                                    "allowed_user_ids": [201],
+                                    "command_prefixes": ["/alice"],
+                                    "state_path": str(alice_root / "telegram-state.json"),
+                                    "run_state_path": str(alice_root / "run-state.json"),
+                                    "chat_session_state_path": str(alice_root / "chat-sessions.json"),
+                                    "assistant_identity_path": str(alice_root / "assistant.json"),
+                                    "assistant": {"name": "Alice Vera"},
+                                    "owner": {
+                                        "user_id": 201,
+                                        "display_name": "Alice Owner",
+                                        "user_memory_root": str(alice_root / "memory"),
+                                    },
+                                    "workspace_root": str(alice_root / "workspaces"),
+                                    "event_log_path": str(alice_root / "events.jsonl"),
+                                },
+                                {
+                                    "id": "bob",
+                                    "bot_username": "bob_bot",
+                                    "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_BOB",
+                                    "allowed_chat_ids": [102],
+                                    "allowed_user_ids": [202],
+                                    "command_prefixes": ["/bob"],
+                                    "state_path": str(bob_root / "telegram-state.json"),
+                                    "run_state_path": str(bob_root / "run-state.json"),
+                                    "chat_session_state_path": str(bob_root / "chat-sessions.json"),
+                                    "assistant_identity_path": str(bob_root / "assistant.json"),
+                                    "assistant": {"name": "Bob Vera"},
+                                    "owner": {
+                                        "user_id": 202,
+                                        "display_name": "Bob Owner",
+                                        "user_memory_root": str(bob_root / "memory"),
+                                    },
+                                    "workspace_root": str(bob_root / "workspaces"),
+                                    "event_log_path": str(bob_root / "events.jsonl"),
+                                },
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = HarnessConfig.load(
+                {
+                    "VERA_TELEGRAM_BOT_TOKEN_ALICE": "alice-secret-token",
+                    "VERA_TELEGRAM_BOT_TOKEN_BOB": "bob-secret-token",
+                    "VERA_CODEX_APP_SERVER_COMMAND": "codex app-server",
+                },
+                telegram_config_path=str(config_path),
+                require_secrets=True,
+            )
+
+        self.assertEqual(config.telegram_shared_chat_ids, (-1000,))
+        self.assertEqual([user.id for user in config.telegram_users], ["alice", "bob"])
+        alice = config.telegram_user("alice")
+        bob = config.telegram_user("bob")
+        self.assertEqual(alice.bot_token_env, "VERA_TELEGRAM_BOT_TOKEN_ALICE")
+        self.assertEqual(alice.bot_token, "alice-secret-token")
+        self.assertEqual(bob.bot_token_env, "VERA_TELEGRAM_BOT_TOKEN_BOB")
+        self.assertEqual(bob.bot_token, "bob-secret-token")
+        self.assertEqual(alice.shared_chat_ids, (-1000,))
+        self.assertEqual(bob.shared_chat_ids, (-1000,))
+        self.assertNotEqual(alice.telegram_state_path, bob.telegram_state_path)
+        self.assertNotEqual(alice.run_state_path, bob.run_state_path)
+        self.assertNotEqual(alice.chat_session_state_path, bob.chat_session_state_path)
+        self.assertNotEqual(alice.workspace_root, bob.workspace_root)
+        self.assertNotEqual(alice.event_log_path, bob.event_log_path)
+        self.assertEqual(alice.assistant_identity.safe_display_name, "Alice Vera")
+        self.assertEqual(bob.assistant_identity.safe_display_name, "Bob Vera")
+        self.assertEqual(alice.owner_profile.user_id, 201)
+        self.assertEqual(bob.owner_profile.user_id, 202)
+        self.assertEqual(alice.user_memory_root, (alice_root / "memory").resolve())
+        self.assertEqual(bob.user_memory_root, (bob_root / "memory").resolve())
+
+        alice_config = config.config_for_telegram_user("alice")
+        self.assertEqual(alice_config.telegram_runtime_id, "alice")
+        self.assertEqual(alice_config.telegram_bot_token, "alice-secret-token")
+        self.assertEqual(alice_config.allowed_chat_ids, (101,))
+        self.assertEqual(alice_config.allowed_user_ids, (201,))
+        self.assertEqual(alice_config.telegram_shared_chat_ids, (-1000,))
+        self.assertEqual(alice_config.telegram_bot_username, "alice_bot")
+        self.assertEqual(alice_config.telegram_command_prefixes, ("/alice",))
+        self.assertEqual(alice_config.telegram_known_bot_usernames, ("alice_bot", "bob_bot"))
+        self.assertEqual(alice_config.telegram_known_command_prefixes, ("/alice", "/bob"))
+        self.assertEqual(alice_config.telegram_users, ())
+
+    def test_multi_user_config_rejects_raw_tokens_and_missing_token_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "telegram": {
+                            "shared_chat_ids": [-1000],
+                            "users": [
+                                {
+                                    "id": "alice",
+                                    "bot_username": "alice_bot",
+                                    "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_ALICE",
+                                    "bot_token": "not-allowed",
+                                    "allowed_user_ids": [201],
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ConfigError, "must not contain secret fields"):
+                HarnessConfig.load({}, telegram_config_path=str(config_path), require_secrets=False)
+
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "telegram": {
+                            "shared_chat_ids": [-1000],
+                            "users": [
+                                {
+                                    "id": "alice",
+                                    "bot_username": "alice_bot",
+                                    "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_ALICE",
+                                    "allowed_user_ids": [201],
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ConfigError, "environment variables are required"):
+                HarnessConfig.load({}, telegram_config_path=str(config_path), require_secrets=True)
+
+    def test_multi_user_config_requires_distinct_token_references(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "telegram": {
+                            "shared_chat_ids": [-1000],
+                            "users": [
+                                {
+                                    "id": "alice",
+                                    "bot_username": "alice_bot",
+                                    "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_SHARED",
+                                    "allowed_user_ids": [201],
+                                },
+                                {
+                                    "id": "bob",
+                                    "bot_username": "bob_bot",
+                                    "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_SHARED",
+                                    "allowed_user_ids": [202],
+                                },
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "duplicate bot_token_env"):
+                HarnessConfig.load(
+                    {"VERA_TELEGRAM_BOT_TOKEN_SHARED": "token-placeholder"},
+                    telegram_config_path=str(config_path),
+                    require_secrets=True,
+                )
+
     def test_load_reads_owner_identity_and_refreshable_profile_from_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir, "telegram.json")

@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
 from zoneinfo import ZoneInfo
 
 from .assistant_identity import (
@@ -28,7 +28,7 @@ from .codex import (
     CodexRuntimePlanner,
     CodexSessionMetadata,
 )
-from .config import HarnessConfig
+from .config import HarnessConfig, TelegramUserConfig
 from .heartbeat import (
     HeartbeatAction,
     HeartbeatContext,
@@ -224,6 +224,8 @@ class TelegramChatResponseDelivery:
     message_id: int
     text: str
     status: TelegramTaskStatus
+    bot_id: Optional[str] = None
+    bot_username: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -243,6 +245,22 @@ class TelegramChatLoopResult:
     poll_result: PollOnceResult
     chat_turns: Tuple[TelegramChatTurnResult, ...]
     response_deliveries: Tuple[TelegramChatResponseDelivery, ...]
+
+
+@dataclass(frozen=True)
+class TelegramUserChatLoopResult:
+    """One configured Telegram bot/user polling cycle."""
+
+    user_id: str
+    bot_username: Optional[str]
+    result: TelegramChatLoopResult
+
+
+@dataclass(frozen=True)
+class MultiTelegramChatLoopResult:
+    """One polling cycle across all configured Telegram bot/user runtimes."""
+
+    user_results: Tuple[TelegramUserChatLoopResult, ...]
 
 
 class VeraHarness:
@@ -270,6 +288,7 @@ class VeraHarness:
             lambda resume_thread_id: CodexAppServerSession(config, resume_thread_id=resume_thread_id)
         )
         self._chat_runtimes: Dict[str, CodexChatRuntime] = {}
+        self._telegram_user_harnesses: Dict[str, "VeraHarness"] = {}
         self._identity = identity_controller or IdentityInterviewController(
             profile_store=JsonIdentityProfileStore(config.identity_profile_path),
             interview_store=JsonIdentityInterviewStore(config.identity_interview_state_path),
@@ -787,6 +806,8 @@ class VeraHarness:
                         message_id=task.message_id,
                         text=assistant_identity_response,
                         status=TelegramTaskStatus.COMPLETED,
+                        bot_id=task.bot_id,
+                        bot_username=task.bot_username,
                     )
                 )
                 continue
@@ -806,6 +827,8 @@ class VeraHarness:
                         message_id=task.message_id,
                         text=identity_response,
                         status=TelegramTaskStatus.COMPLETED,
+                        bot_id=task.bot_id,
+                        bot_username=task.bot_username,
                     )
                 )
                 continue
@@ -825,6 +848,8 @@ class VeraHarness:
                         message_id=task.message_id,
                         text=memory_control_response,
                         status=TelegramTaskStatus.COMPLETED,
+                        bot_id=task.bot_id,
+                        bot_username=task.bot_username,
                     )
                 )
                 continue
@@ -845,6 +870,8 @@ class VeraHarness:
                     message_id=task.message_id,
                     text=response_text,
                     status=response_status,
+                    bot_id=task.bot_id,
+                    bot_username=task.bot_username,
                 )
             )
             turns.append(
@@ -861,6 +888,47 @@ class VeraHarness:
             chat_turns=tuple(turns),
             response_deliveries=tuple(responses),
         )
+
+    def run_multi_user_telegram_chat_poll_once(
+        self,
+        polling_intakes: Optional[Mapping[str, TelegramLongPollingIntake]] = None,
+        create_workspace: bool = True,
+        workspace_policy: WorkspaceReusePolicy = WorkspaceReusePolicy.REUSE,
+        run_bootstrap: bool = True,
+    ) -> MultiTelegramChatLoopResult:
+        """Poll every configured Telegram bot once with isolated per-user runtimes."""
+
+        user_results: List[TelegramUserChatLoopResult] = []
+        for user in self._config.telegram_users:
+            child = self._harness_for_telegram_user(user)
+            intake = polling_intakes.get(user.id) if polling_intakes is not None else None
+            result = child.run_telegram_chat_poll_once(
+                polling_intake=intake,
+                create_workspace=create_workspace,
+                workspace_policy=workspace_policy,
+                run_bootstrap=run_bootstrap,
+            )
+            user_results.append(
+                TelegramUserChatLoopResult(
+                    user_id=user.id,
+                    bot_username=user.bot_username,
+                    result=result,
+                )
+            )
+        return MultiTelegramChatLoopResult(user_results=tuple(user_results))
+
+    def _harness_for_telegram_user(self, user: TelegramUserConfig) -> "VeraHarness":
+        harness = self._telegram_user_harnesses.get(user.id)
+        if harness is not None:
+            return harness
+        harness = VeraHarness(
+            self._config.config_for_telegram_user(user),
+            runtime=self._runtime,
+            chat_runtime_factory=self._chat_runtime_factory,
+            on_event=self._on_event,
+        )
+        self._telegram_user_harnesses[user.id] = harness
+        return harness
 
     def run_heartbeat_tick(
         self,
@@ -1592,9 +1660,18 @@ def format_telegram_chat_loop(
         lines.append("- none")
     for turn in result.chat_turns:
         metadata = turn.run_result.metadata
+        lines.extend(["- session_id: {}".format(turn.session.session_id)])
+        if turn.task.bot_id is not None:
+            lines.extend(
+                [
+                    "  telegram_bot_id: {}".format(turn.task.bot_id),
+                    "  telegram_bot_username: {}".format(
+                        _display_optional(turn.task.bot_username)
+                    ),
+                ]
+            )
         lines.extend(
             [
-                "- session_id: {}".format(turn.session.session_id),
                 "  telegram_chat_id: {}".format(turn.task.chat_id),
                 "  telegram_user_id: {}".format(turn.task.user_id),
                 "  telegram_update_id: {}".format(_display_optional(turn.update_id)),
@@ -1612,9 +1689,18 @@ def format_telegram_chat_loop(
     if not result.response_deliveries:
         lines.append("- none")
     for delivery in result.response_deliveries:
+        lines.extend(["- status: {}".format(delivery.status.value)])
+        if delivery.bot_id is not None:
+            lines.extend(
+                [
+                    "  telegram_bot_id: {}".format(delivery.bot_id),
+                    "  telegram_bot_username: {}".format(
+                        _display_optional(delivery.bot_username)
+                    ),
+                ]
+            )
         lines.extend(
             [
-                "- status: {}".format(delivery.status.value),
                 "  session_id: {}".format(delivery.session_id),
                 "  task_id: {}".format(delivery.task_id),
                 "  telegram_chat_id: {}".format(delivery.chat_id),
@@ -1623,6 +1709,30 @@ def format_telegram_chat_loop(
                 "  telegram_text: {}".format(_compact_log_value(delivery.text)),
             ]
         )
+    return "\n".join(lines)
+
+
+def format_multi_telegram_chat_loop(
+    result: MultiTelegramChatLoopResult,
+    title: str = "Vera multi-user Telegram-to-Codex chat loop",
+) -> str:
+    lines = [title]
+    for user_result in result.user_results:
+        header = "telegram_user: {}".format(user_result.user_id)
+        if user_result.bot_username is not None:
+            header = "{} (@{})".format(header, user_result.bot_username)
+        lines.extend(
+            [
+                "",
+                header,
+                format_telegram_chat_loop(
+                    user_result.result,
+                    title="Vera Telegram-to-Codex chat loop",
+                ),
+            ]
+        )
+    if not result.user_results:
+        lines.extend(["", "telegram_user: none configured"])
     return "\n".join(lines)
 
 
@@ -1639,6 +1749,10 @@ def _telegram_identity_payload(
         "session_identity": identity,
         "session_identity_label": "authorized Telegram user_id {}".format(task.user_id),
     }
+    if task.bot_id is not None:
+        payload["telegram_bot_id"] = task.bot_id
+        if task.bot_username is not None:
+            payload["telegram_bot_username"] = task.bot_username
     if owner_profile is not None and owner_profile.matches(task):
         payload["session_identity_label"] = owner_profile.redacted_identity_label(
             fallback_username=task.username

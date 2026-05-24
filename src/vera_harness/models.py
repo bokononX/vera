@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -86,6 +87,8 @@ class TelegramTask:
     message_id: int
     text: str
     username: Optional[str] = None
+    bot_id: Optional[str] = None
+    bot_username: Optional[str] = None
     received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @classmethod
@@ -96,6 +99,8 @@ class TelegramTask:
         message_id: int,
         text: str,
         username: Optional[str] = None,
+        bot_id: Optional[str] = None,
+        bot_username: Optional[str] = None,
         received_at: Optional[datetime] = None,
     ) -> "TelegramTask":
         if not isinstance(chat_id, int):
@@ -107,13 +112,19 @@ class TelegramTask:
         normalized_text = text.strip()
         if not normalized_text:
             raise ValueError("Telegram task text must not be empty")
+        normalized_bot_id = _optional_id_segment(bot_id, "bot_id")
+        task_id = "telegram-{}-{}".format(chat_id, message_id)
+        if normalized_bot_id is not None:
+            task_id = "telegram-{}-{}-{}".format(normalized_bot_id, chat_id, message_id)
         return cls(
-            task_id="telegram-{}-{}".format(chat_id, message_id),
+            task_id=task_id,
             chat_id=chat_id,
             user_id=user_id,
             message_id=message_id,
             text=normalized_text,
             username=username.strip() if username else None,
+            bot_id=normalized_bot_id,
+            bot_username=bot_username.strip().lstrip("@") if bot_username else None,
             received_at=received_at or datetime.now(timezone.utc),
         )
 
@@ -121,6 +132,15 @@ class TelegramTask:
         if len(self.text) <= limit:
             return self.text
         return "{}...".format(self.text[: max(0, limit - 3)])
+
+
+def _optional_id_segment(value: Optional[str], field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip(".-")
+    if not normalized or normalized in {".", ".."}:
+        raise ValueError("{} must contain usable identifier characters".format(field_name))
+    return normalized[:80]
 
 
 @dataclass(frozen=True)

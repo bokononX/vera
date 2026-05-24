@@ -48,15 +48,63 @@ def _config(temp_dir, extra=None):
     return HarnessConfig.from_env(env, require_secrets=False)
 
 
-def _message_update(update_id, chat_id=100, user_id=200, message_id=300, text="Do the work"):
+def _multi_config(temp_dir):
+    return HarnessConfig.from_env(
+        {
+            "VERA_TELEGRAM_BOT_TOKEN_ALICE": "alice-secret-token",
+            "VERA_TELEGRAM_BOT_TOKEN_BOB": "bob-secret-token",
+            "VERA_WORKSPACE_ROOT": temp_dir,
+        },
+        require_secrets=True,
+        telegram_config={
+            "shared_chat_ids": [-1000],
+            "users": [
+                {
+                    "id": "alice",
+                    "bot_username": "alice_bot",
+                    "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_ALICE",
+                    "allowed_chat_ids": [101],
+                    "allowed_user_ids": [201],
+                    "command_prefixes": ["/alice"],
+                    "state_path": str(Path(temp_dir, "alice-telegram-state.json")),
+                },
+                {
+                    "id": "bob",
+                    "bot_username": "bob_bot",
+                    "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_BOB",
+                    "allowed_chat_ids": [102],
+                    "allowed_user_ids": [202],
+                    "command_prefixes": ["/bob"],
+                    "state_path": str(Path(temp_dir, "bob-telegram-state.json")),
+                },
+            ],
+        },
+    )
+
+
+def _message_update(
+    update_id,
+    chat_id=100,
+    user_id=200,
+    message_id=300,
+    text="Do the work",
+    chat_type="private",
+    reply_to_username=None,
+):
+    message = {
+        "message_id": message_id,
+        "chat": {"id": chat_id, "type": chat_type},
+        "from": {"id": user_id, "username": "vera_user"},
+        "text": text,
+    }
+    if reply_to_username is not None:
+        message["reply_to_message"] = {
+            "message_id": message_id - 1,
+            "from": {"id": 999, "username": reply_to_username, "is_bot": True},
+        }
     return {
         "update_id": update_id,
-        "message": {
-            "message_id": message_id,
-            "chat": {"id": chat_id},
-            "from": {"id": user_id, "username": "vera_user"},
-            "text": text,
-        },
+        "message": message,
     }
 
 
@@ -273,6 +321,101 @@ class TelegramLongPollingIntakeTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(store.task_status(task.task_id), TelegramTaskStatus.FAILED.value)
+
+    def test_shared_chat_requires_explicit_bot_routing_without_fanout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _multi_config(temp_dir)
+            alice_config = config.config_for_telegram_user("alice")
+            bob_config = config.config_for_telegram_user("bob")
+            shared_updates = [
+                _message_update(
+                    update_id=20,
+                    chat_id=-1000,
+                    user_id=201,
+                    message_id=400,
+                    text="@alice_bot please handle this",
+                    chat_type="supergroup",
+                ),
+                _message_update(
+                    update_id=21,
+                    chat_id=-1000,
+                    user_id=201,
+                    message_id=401,
+                    text="unaddressed shared chatter",
+                    chat_type="supergroup",
+                ),
+                _message_update(
+                    update_id=22,
+                    chat_id=-1000,
+                    user_id=201,
+                    message_id=402,
+                    text="@alice_bot @bob_bot ambiguous",
+                    chat_type="supergroup",
+                ),
+                _message_update(
+                    update_id=23,
+                    chat_id=-1000,
+                    user_id=202,
+                    message_id=403,
+                    text="/bob shared prefix route",
+                    chat_type="group",
+                ),
+                _message_update(
+                    update_id=24,
+                    chat_id=-1000,
+                    user_id=201,
+                    message_id=404,
+                    text="reply route",
+                    chat_type="supergroup",
+                    reply_to_username="alice_bot",
+                ),
+            ]
+
+            alice_polling = TelegramLongPollingIntake(
+                alice_config,
+                api=FakeTelegramApi(shared_updates),
+                store=TelegramUpdateStore(alice_config.telegram_state_path),
+            )
+            bob_polling = TelegramLongPollingIntake(
+                bob_config,
+                api=FakeTelegramApi(shared_updates),
+                store=TelegramUpdateStore(bob_config.telegram_state_path),
+            )
+
+            alice_outcomes = alice_polling.poll_once()
+            bob_outcomes = bob_polling.poll_once()
+            alice_next_offset = alice_polling.store.next_offset()
+            bob_next_offset = bob_polling.store.next_offset()
+
+        self.assertEqual(
+            [outcome.status for outcome in alice_outcomes],
+            [
+                TelegramUpdateStatus.ACCEPTED,
+                TelegramUpdateStatus.IGNORED,
+                TelegramUpdateStatus.IGNORED,
+                TelegramUpdateStatus.IGNORED,
+                TelegramUpdateStatus.ACCEPTED,
+            ],
+        )
+        self.assertEqual(
+            [outcome.status for outcome in bob_outcomes],
+            [
+                TelegramUpdateStatus.IGNORED,
+                TelegramUpdateStatus.IGNORED,
+                TelegramUpdateStatus.IGNORED,
+                TelegramUpdateStatus.ACCEPTED,
+                TelegramUpdateStatus.IGNORED,
+            ],
+        )
+        alice_tasks = alice_polling.queue.queued_tasks()
+        bob_tasks = bob_polling.queue.queued_tasks()
+        self.assertEqual([task.task_id for task in alice_tasks], ["telegram-alice--1000-400", "telegram-alice--1000-404"])
+        self.assertEqual([task.text for task in alice_tasks], ["please handle this", "reply route"])
+        self.assertEqual([task.task_id for task in bob_tasks], ["telegram-bob--1000-403"])
+        self.assertEqual(bob_tasks[0].text, "shared prefix route")
+        self.assertNotEqual(alice_config.telegram_state_path, bob_config.telegram_state_path)
+        self.assertEqual(alice_next_offset, 25)
+        self.assertEqual(bob_next_offset, 25)
 
 
 if __name__ == "__main__":

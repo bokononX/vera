@@ -25,6 +25,7 @@ from vera_harness.orchestrator import (
     FakeCodexRuntime,
     VeraHarness,
     format_dry_run,
+    format_multi_telegram_chat_loop,
     format_telegram_chat_loop,
     format_telegram_loop,
 )
@@ -430,6 +431,119 @@ class TelegramChatSessionTests(unittest.TestCase):
             state = Path(config.chat_session_state_path).read_text(encoding="utf-8")
             self.assertIn("thread-1", state)
             self.assertIn("telegram-chat-100-user-200", state)
+
+    def test_multi_user_fake_smoke_routes_shared_chat_once_and_isolates_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _multi_user_config(temp_dir)
+            alice_config = config.config_for_telegram_user("alice")
+            bob_config = config.config_for_telegram_user("bob")
+            shared_message = _message_update(
+                update_id=300,
+                chat_id=-1000,
+                user_id=201,
+                message_id=700,
+                text="@alice_bot please handle the shared task",
+                chat_type="supergroup",
+            )
+            ambiguous_message = _message_update(
+                update_id=301,
+                chat_id=-1000,
+                user_id=201,
+                message_id=701,
+                text="shared message without routing",
+                chat_type="supergroup",
+            )
+            alice_api = FakeTelegramApi(
+                (
+                    _message_update(
+                        update_id=100,
+                        chat_id=101,
+                        user_id=201,
+                        message_id=500,
+                        text="alice direct task",
+                    ),
+                    shared_message,
+                    ambiguous_message,
+                )
+            )
+            bob_api = FakeTelegramApi(
+                (
+                    _message_update(
+                        update_id=200,
+                        chat_id=102,
+                        user_id=202,
+                        message_id=600,
+                        text="bob direct task",
+                    ),
+                    shared_message,
+                    ambiguous_message,
+                )
+            )
+            intakes = {
+                "alice": TelegramLongPollingIntake(
+                    alice_config,
+                    api=alice_api,
+                    store=TelegramUpdateStore(alice_config.telegram_state_path),
+                    send_accepted_reply=False,
+                ),
+                "bob": TelegramLongPollingIntake(
+                    bob_config,
+                    api=bob_api,
+                    store=TelegramUpdateStore(bob_config.telegram_state_path),
+                    send_accepted_reply=False,
+                ),
+            }
+            responses = iter(("alice direct response", "alice shared response", "bob direct response"))
+            runtimes = []
+
+            def runtime_factory(resume_thread_id):
+                runtime = ScriptedChatRuntime((next(responses),))
+                runtimes.append(runtime)
+                return runtime
+
+            result = VeraHarness(config, chat_runtime_factory=runtime_factory).run_multi_user_telegram_chat_poll_once(
+                polling_intakes=intakes,
+                run_bootstrap=False,
+            )
+            output = format_multi_telegram_chat_loop(result)
+            alice_chat_state_exists = Path(alice_config.chat_session_state_path).exists()
+            bob_chat_state_exists = Path(bob_config.chat_session_state_path).exists()
+
+        alice_result = result.user_results[0].result
+        bob_result = result.user_results[1].result
+        self.assertEqual(result.user_results[0].user_id, "alice")
+        self.assertEqual(result.user_results[1].user_id, "bob")
+        self.assertEqual(len(alice_result.chat_turns), 2)
+        self.assertEqual(len(bob_result.chat_turns), 1)
+        self.assertEqual(
+            [message["text"] for message in alice_api.sent_messages],
+            ["alice direct response", "alice shared response"],
+        )
+        self.assertEqual([message["text"] for message in bob_api.sent_messages], ["bob direct response"])
+        self.assertEqual(
+            [turn.session.session_id for turn in alice_result.chat_turns],
+            [
+                "telegram-bot-alice-chat-101-user-201",
+                "telegram-bot-alice-chat--1000-user-201",
+            ],
+        )
+        self.assertEqual(
+            [turn.session.session_id for turn in bob_result.chat_turns],
+            ["telegram-bot-bob-chat-102-user-202"],
+        )
+        self.assertTrue(alice_chat_state_exists)
+        self.assertTrue(bob_chat_state_exists)
+        self.assertNotEqual(alice_config.chat_session_state_path, bob_config.chat_session_state_path)
+        self.assertNotEqual(alice_config.run_state_path, bob_config.run_state_path)
+        self.assertNotEqual(alice_config.workspace_root, bob_config.workspace_root)
+        self.assertIn("telegram_bot_id: alice", output)
+        self.assertIn("telegram_bot_id: bob", output)
+        self.assertIn("telegram_user: alice (@alice_bot)", output)
+        self.assertIn("telegram_user: bob (@bob_bot)", output)
+        self.assertIn("alice style", runtimes[0].prompts[0])
+        self.assertIn("alice style", runtimes[1].prompts[0])
+        self.assertIn("bob style", runtimes[2].prompts[0])
+        self.assertNotIn("alice style", runtimes[2].prompts[0])
 
     def test_who_are_you_returns_assistant_identity_without_codex_leak(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1187,6 +1301,77 @@ def _config(temp_dir, extra_env=None, owner_config=None):
     return HarnessConfig.from_env(env, require_secrets=False, owner_config=owner_config)
 
 
+def _multi_user_config(temp_dir):
+    alice_root = Path(temp_dir, "alice")
+    bob_root = Path(temp_dir, "bob")
+    return HarnessConfig.from_env(
+        {
+            "VERA_TELEGRAM_BOT_TOKEN_ALICE": "alice-secret-token",
+            "VERA_TELEGRAM_BOT_TOKEN_BOB": "bob-secret-token",
+            "VERA_CODEX_APP_SERVER_COMMAND": "fake-codex app-server",
+            "VERA_WORKSPACE_ROOT": temp_dir,
+        },
+        require_secrets=True,
+        telegram_config={
+            "shared_chat_ids": [-1000],
+            "users": [
+                {
+                    "id": "alice",
+                    "bot_username": "alice_bot",
+                    "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_ALICE",
+                    "allowed_chat_ids": [101],
+                    "allowed_user_ids": [201],
+                    "command_prefixes": ["/alice"],
+                    "state_path": str(alice_root / "telegram-state.json"),
+                    "run_state_path": str(alice_root / "run-state.json"),
+                    "chat_session_state_path": str(alice_root / "chat-sessions.json"),
+                    "identity_profile_path": str(alice_root / "identity-profile.json"),
+                    "identity_interview_state_path": str(alice_root / "identity-interviews.json"),
+                    "assistant_identity_path": str(alice_root / "assistant.json"),
+                    "assistant_identity_interview_state_path": str(
+                        alice_root / "assistant-interviews.json"
+                    ),
+                    "assistant": {"name": "Alice Vera"},
+                    "owner": {
+                        "user_id": 201,
+                        "display_name": "Alice Owner",
+                        "communication_style": ["alice style"],
+                    },
+                    "user_memory_root": str(alice_root / "memory"),
+                    "workspace_root": str(alice_root / "workspaces"),
+                    "event_log_path": str(alice_root / "events.jsonl"),
+                },
+                {
+                    "id": "bob",
+                    "bot_username": "bob_bot",
+                    "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_BOB",
+                    "allowed_chat_ids": [102],
+                    "allowed_user_ids": [202],
+                    "command_prefixes": ["/bob"],
+                    "state_path": str(bob_root / "telegram-state.json"),
+                    "run_state_path": str(bob_root / "run-state.json"),
+                    "chat_session_state_path": str(bob_root / "chat-sessions.json"),
+                    "identity_profile_path": str(bob_root / "identity-profile.json"),
+                    "identity_interview_state_path": str(bob_root / "identity-interviews.json"),
+                    "assistant_identity_path": str(bob_root / "assistant.json"),
+                    "assistant_identity_interview_state_path": str(
+                        bob_root / "assistant-interviews.json"
+                    ),
+                    "assistant": {"name": "Bob Vera"},
+                    "owner": {
+                        "user_id": 202,
+                        "display_name": "Bob Owner",
+                        "communication_style": ["bob style"],
+                    },
+                    "user_memory_root": str(bob_root / "memory"),
+                    "workspace_root": str(bob_root / "workspaces"),
+                    "event_log_path": str(bob_root / "events.jsonl"),
+                },
+            ],
+        },
+    )
+
+
 def _heartbeat_config(temp_dir, extra_env=None):
     env = {
         "VERA_ALLOWED_CHAT_IDS": "100",
@@ -1258,12 +1443,19 @@ class FakeTelegramApi:
         return {"message_id": len(self.sent_messages)}
 
 
-def _message_update(update_id, chat_id=100, user_id=200, message_id=300, text="Do the work"):
+def _message_update(
+    update_id,
+    chat_id=100,
+    user_id=200,
+    message_id=300,
+    text="Do the work",
+    chat_type="private",
+):
     return {
         "update_id": update_id,
         "message": {
             "message_id": message_id,
-            "chat": {"id": chat_id},
+            "chat": {"id": chat_id, "type": chat_type},
             "from": {"id": user_id, "username": "vera_user"},
             "text": text,
         },

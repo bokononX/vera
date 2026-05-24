@@ -1,0 +1,62 @@
+{
+  "telegram": {
+    "shared_chat_ids": [-1001234567890],
+    "api_base_url": "https://api.telegram.org",
+    "poll_timeout_seconds": 30,
+    "request_timeout_seconds": 35,
+    "users": [
+      {
+        "id": "alice",
+        "bot_username": "alice_vera_bot",
+        "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_ALICE",
+        "allowed_chat_ids": [111111],
+        "allowed_user_ids": [222222],
+        "command_prefixes": ["/alice"],
+        "state_path": "./runtime/telegram_users/alice/telegram_state.json",
+        "run_state_path": "./runtime/telegram_users/alice/run_state.json",
+        "chat_session_state_path": "./runtime/telegram_users/alice/chat_sessions.json",
+        "assistant_identity_path": "./runtime/telegram_users/alice/assistant_identity.json",
+        "assistant_identity_interview_state_path": "./runtime/telegram_users/alice/assistant_identity_interviews.json",
+        "identity_profile_path": "./runtime/telegram_users/alice/identity_profile.json",
+        "identity_interview_state_path": "./runtime/telegram_users/alice/identity_interviews.json",
+        "user_memory_root": "./runtime/telegram_users/alice/memory",
+        "workspace_root": "./runtime/telegram_users/alice/workspaces",
+        "event_log_path": "./runtime/telegram_users/alice/events.jsonl",
+        "assistant": {
+          "name": "Alice Vera"
+        },
+        "owner": {
+          "user_id": 222222,
+          "display_name": "Alice Owner",
+          "username": "alice_owner"
+        }
+      },
+      {
+        "id": "bob",
+        "bot_username": "bob_vera_bot",
+        "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_BOB",
+        "allowed_chat_ids": [333333],
+        "allowed_user_ids": [444444],
+        "command_prefixes": ["/bob"],
+        "state_path": "./runtime/telegram_users/bob/telegram_state.json",
+        "run_state_path": "./runtime/telegram_users/bob/run_state.json",
+        "chat_session_state_path": "./runtime/telegram_users/bob/chat_sessions.json",
+        "assistant_identity_path": "./runtime/telegram_users/bob/assistant_identity.json",
+        "assistant_identity_interview_state_path": "./runtime/telegram_users/bob/assistant_identity_interviews.json",
+        "identity_profile_path": "./runtime/telegram_users/bob/identity_profile.json",
+        "identity_interview_state_path": "./runtime/telegram_users/bob/identity_interviews.json",
+        "user_memory_root": "./runtime/telegram_users/bob/memory",
+        "workspace_root": "./runtime/telegram_users/bob/workspaces",
+        "event_log_path": "./runtime/telegram_users/bob/events.jsonl",
+        "assistant": {
+          "name": "Bob Vera"
+        },
+        "owner": {
+          "user_id": 444444,
+          "display_name": "Bob Owner",
+          "username": "bob_owner"
+        }
+      }
+    ]
+  }
+}

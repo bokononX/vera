@@ -46,10 +46,21 @@ class JsonTelegramChatSessionStore:
         return self._path
 
     def session_for_task(self, task: TelegramTask) -> Optional[TelegramChatSession]:
-        return self.session_for_ids(chat_id=task.chat_id, user_id=task.user_id)
+        return self.session_for_ids(
+            chat_id=task.chat_id,
+            user_id=task.user_id,
+            bot_id=task.bot_id,
+        )
 
-    def session_for_ids(self, chat_id: int, user_id: int) -> Optional[TelegramChatSession]:
-        return self.session_by_id(session_id_for_telegram(chat_id=chat_id, user_id=user_id))
+    def session_for_ids(
+        self,
+        chat_id: int,
+        user_id: int,
+        bot_id: Optional[str] = None,
+    ) -> Optional[TelegramChatSession]:
+        return self.session_by_id(
+            session_id_for_telegram(chat_id=chat_id, user_id=user_id, bot_id=bot_id)
+        )
 
     def session_by_id(self, session_id: str) -> Optional[TelegramChatSession]:
         raw = self._load().get("sessions", {}).get(session_id)
@@ -74,7 +85,11 @@ class JsonTelegramChatSessionStore:
                 return existing
             return self.save(replace(existing, username=task.username))
         session = TelegramChatSession(
-            session_id=session_id_for_telegram(chat_id=task.chat_id, user_id=task.user_id),
+            session_id=session_id_for_telegram(
+                chat_id=task.chat_id,
+                user_id=task.user_id,
+                bot_id=task.bot_id,
+            ),
             chat_id=task.chat_id,
             user_id=task.user_id,
             username=task.username,
@@ -116,7 +131,13 @@ class JsonTelegramChatSessionStore:
         temp_path.replace(self._path)
 
 
-def session_id_for_telegram(chat_id: int, user_id: int) -> str:
+def session_id_for_telegram(
+    chat_id: int,
+    user_id: int,
+    bot_id: Optional[str] = None,
+) -> str:
+    if bot_id:
+        return _safe_session_id("telegram-bot-{}-chat-{}-user-{}".format(bot_id, chat_id, user_id))
     return _safe_session_id("telegram-chat-{}-user-{}".format(chat_id, user_id))
 
 
