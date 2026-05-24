@@ -9,6 +9,7 @@ status replies. Codex and workspace orchestration consume normalized
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -57,6 +58,28 @@ class TelegramIntakeOutcome:
     update_id: Optional[int]
     status: TelegramUpdateStatus
     task: Optional[TelegramTask] = None
+    reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TelegramMessage:
+    """Normalized Telegram message fields needed by intake routing."""
+
+    chat_id: int
+    user_id: int
+    message_id: int
+    text: str
+    username: Optional[str] = None
+    chat_type: Optional[str] = None
+    reply_to_username: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TelegramSharedRoute:
+    """Routing decision for one shared Telegram group/supergroup message."""
+
+    accepted: bool
+    text: str
     reason: Optional[str] = None
 
 
@@ -239,12 +262,46 @@ class TelegramIntake:
 
     def is_allowed(self, chat_id: int, user_id: int) -> bool:
         chat_allowed = (
-            not self._config.allowed_chat_ids or chat_id in self._config.allowed_chat_ids
+            not self._config.allowed_chat_ids
+            or chat_id in self._config.allowed_chat_ids
+            or chat_id in self._config.telegram_shared_chat_ids
         )
         user_allowed = (
             not self._config.allowed_user_ids or user_id in self._config.allowed_user_ids
         )
         return chat_allowed and user_allowed
+
+    def route_shared_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to_username: Optional[str] = None,
+    ) -> TelegramSharedRoute:
+        if chat_id not in self._config.telegram_shared_chat_ids:
+            return TelegramSharedRoute(accepted=True, text=text)
+
+        target = _shared_route_target(
+            text=text,
+            reply_to_username=reply_to_username,
+            bot_username=self._config.telegram_bot_username,
+            known_bot_usernames=self._config.telegram_known_bot_usernames,
+            command_prefixes=self._config.telegram_command_prefixes,
+            known_command_prefixes=self._config.telegram_known_command_prefixes,
+        )
+        if target != "current":
+            return TelegramSharedRoute(
+                accepted=False,
+                text=text,
+                reason="shared chat message was not explicitly addressed to this bot",
+            )
+        return TelegramSharedRoute(
+            accepted=True,
+            text=_strip_shared_route_tokens(
+                text,
+                bot_username=self._config.telegram_bot_username,
+                command_prefixes=self._config.telegram_command_prefixes,
+            ),
+        )
 
     def task_from_message(
         self,
@@ -264,6 +321,8 @@ class TelegramIntake:
             message_id=message_id,
             text=text,
             username=username,
+            bot_id=self._config.telegram_runtime_id,
+            bot_username=self._config.telegram_bot_username,
         )
 
 
@@ -352,9 +411,21 @@ class TelegramLongPollingIntake:
                 reason="update did not contain a supported message",
             )
 
-        chat_id, user_id, message_id, text, username = message
-        if not self._intake.is_allowed(chat_id=chat_id, user_id=user_id):
-            self._send_unauthorized_response(chat_id, message_id)
+        route = self._intake.route_shared_message(
+            chat_id=message.chat_id,
+            text=message.text,
+            reply_to_username=message.reply_to_username,
+        )
+        if not route.accepted:
+            self._store.mark_update_processed(update_id)
+            return TelegramIntakeOutcome(
+                update_id=update_id,
+                status=TelegramUpdateStatus.IGNORED,
+                reason=route.reason,
+            )
+
+        if not self._intake.is_allowed(chat_id=message.chat_id, user_id=message.user_id):
+            self._send_unauthorized_response(message.chat_id, message.message_id)
             self._store.mark_update_processed(update_id)
             return TelegramIntakeOutcome(
                 update_id=update_id,
@@ -364,21 +435,21 @@ class TelegramLongPollingIntake:
 
         try:
             task = self._intake.task_from_message(
-                chat_id=chat_id,
-                user_id=user_id,
-                message_id=message_id,
-                text=text,
-                username=username,
+                chat_id=message.chat_id,
+                user_id=message.user_id,
+                message_id=message.message_id,
+                text=route.text,
+                username=message.username,
             )
         except ValueError as exc:
             self._store.mark_update_processed(update_id)
             self._api.send_message(
-                chat_id=chat_id,
+                chat_id=message.chat_id,
                 text=format_telegram_status(
                     TelegramTaskStatus.BLOCKED,
                     reason="Send a text task for Vera to run.",
                 ),
-                reply_to_message_id=message_id,
+                reply_to_message_id=message.message_id,
             )
             return TelegramIntakeOutcome(
                 update_id=update_id,
@@ -391,9 +462,9 @@ class TelegramLongPollingIntake:
         self._queue.enqueue(task)
         if self._send_accepted_reply:
             self._api.send_message(
-                chat_id=chat_id,
+                chat_id=message.chat_id,
                 text=format_telegram_status(TelegramTaskStatus.ACCEPTED),
-                reply_to_message_id=message_id,
+                reply_to_message_id=message.message_id,
             )
         return TelegramIntakeOutcome(
             update_id=update_id,
@@ -463,7 +534,7 @@ def _urllib_json_request(
     return decoded
 
 
-def _extract_message(update: Mapping[str, Any]) -> Optional[Tuple[int, int, int, str, Optional[str]]]:
+def _extract_message(update: Mapping[str, Any]) -> Optional[TelegramMessage]:
     message = update.get("message")
     if not isinstance(message, Mapping):
         return None
@@ -484,7 +555,111 @@ def _extract_message(update: Mapping[str, Any]) -> Optional[Tuple[int, int, int,
     username = sender.get("username")
     if not isinstance(username, str):
         username = None
-    return chat_id, user_id, message_id, text, username
+    chat_type = chat.get("type")
+    if not isinstance(chat_type, str):
+        chat_type = None
+    reply_to_username = _reply_to_username(message)
+    return TelegramMessage(
+        chat_id=chat_id,
+        user_id=user_id,
+        message_id=message_id,
+        text=text,
+        username=username,
+        chat_type=chat_type,
+        reply_to_username=reply_to_username,
+    )
+
+
+def _reply_to_username(message: Mapping[str, Any]) -> Optional[str]:
+    reply = message.get("reply_to_message")
+    if not isinstance(reply, Mapping):
+        return None
+    sender = reply.get("from")
+    if not isinstance(sender, Mapping):
+        return None
+    username = sender.get("username")
+    if not isinstance(username, str):
+        return None
+    username = username.strip().lstrip("@")
+    return username or None
+
+
+def _shared_route_target(
+    text: str,
+    reply_to_username: Optional[str],
+    bot_username: Optional[str],
+    known_bot_usernames: Tuple[str, ...],
+    command_prefixes: Tuple[str, ...],
+    known_command_prefixes: Tuple[str, ...],
+) -> str:
+    targets = set()
+    current_username = bot_username.lower() if bot_username else None
+    known_usernames = {username.lower() for username in known_bot_usernames}
+    for mention in _mentioned_usernames(text):
+        if mention in known_usernames:
+            targets.add("current" if mention == current_username else "other")
+
+    if reply_to_username is not None:
+        reply_username = reply_to_username.lower()
+        if reply_username in known_usernames:
+            targets.add("current" if reply_username == current_username else "other")
+
+    matched_prefixes = _matched_command_prefixes(text, known_command_prefixes)
+    if matched_prefixes:
+        current_prefixes = set(command_prefixes)
+        for prefix in matched_prefixes:
+            targets.add("current" if prefix in current_prefixes else "other")
+
+    if len(targets) != 1:
+        return "ambiguous" if targets else "none"
+    return next(iter(targets))
+
+
+def _mentioned_usernames(text: str) -> Tuple[str, ...]:
+    return tuple(
+        match.group(1).lower()
+        for match in re.finditer(r"@([A-Za-z0-9_]{5,32})", text)
+    )
+
+
+def _matched_command_prefixes(
+    text: str,
+    known_command_prefixes: Tuple[str, ...],
+) -> Tuple[str, ...]:
+    stripped = text.lstrip()
+    matches = []
+    for prefix in known_command_prefixes:
+        if _text_starts_with_prefix(stripped, prefix):
+            matches.append(prefix)
+    return tuple(sorted(matches, key=len, reverse=True))
+
+
+def _text_starts_with_prefix(text: str, prefix: str) -> bool:
+    if not text.startswith(prefix):
+        return False
+    if len(text) == len(prefix):
+        return True
+    return text[len(prefix)].isspace()
+
+
+def _strip_shared_route_tokens(
+    text: str,
+    bot_username: Optional[str],
+    command_prefixes: Tuple[str, ...],
+) -> str:
+    stripped = text.strip()
+    for prefix in sorted(command_prefixes, key=len, reverse=True):
+        if _text_starts_with_prefix(stripped, prefix):
+            stripped = stripped[len(prefix) :].strip()
+            break
+    if bot_username:
+        stripped = re.sub(
+            r"@{}\b".format(re.escape(bot_username)),
+            "",
+            stripped,
+            flags=re.IGNORECASE,
+        ).strip()
+    return stripped
 
 
 def _status_detail(reason: Optional[str]) -> str:

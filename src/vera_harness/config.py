@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from pathlib import Path
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .assistant_identity import (
@@ -111,6 +112,44 @@ class HeartbeatConfig:
 
 
 @dataclass(frozen=True)
+class TelegramUserConfig:
+    """One human/user Telegram bot runtime in a multi-user deployment."""
+
+    id: str
+    bot_token_env: str
+    bot_token: Optional[str]
+    bot_username: Optional[str] = None
+    allowed_chat_ids: Tuple[int, ...] = ()
+    allowed_user_ids: Tuple[int, ...] = ()
+    shared_chat_ids: Tuple[int, ...] = ()
+    command_prefixes: Tuple[str, ...] = ()
+    known_bot_usernames: Tuple[str, ...] = ()
+    known_command_prefixes: Tuple[str, ...] = ()
+    telegram_api_base_url: str = "https://api.telegram.org"
+    telegram_poll_timeout_seconds: int = 30
+    telegram_request_timeout_seconds: int = 35
+    telegram_state_path: Path = field(default_factory=lambda: Path(DEFAULT_TELEGRAM_STATE_PATH).expanduser().resolve())
+    assistant_identity: AssistantIdentity = field(default_factory=AssistantIdentity.default)
+    assistant_identity_path: Path = field(default_factory=lambda: Path(DEFAULT_ASSISTANT_IDENTITY_PATH).expanduser().resolve())
+    assistant_identity_interview_state_path: Path = field(
+        default_factory=lambda: Path(DEFAULT_ASSISTANT_IDENTITY_INTERVIEW_STATE_PATH).expanduser().resolve()
+    )
+    owner_profile: Optional[OwnerProfile] = None
+    run_state_path: Path = field(default_factory=lambda: Path(DEFAULT_RUN_STATE_PATH).expanduser().resolve())
+    chat_session_state_path: Path = field(default_factory=lambda: Path(DEFAULT_CHAT_SESSION_STATE_PATH).expanduser().resolve())
+    identity_profile_path: Path = field(default_factory=lambda: Path(DEFAULT_IDENTITY_PROFILE_PATH).expanduser().resolve())
+    identity_interview_state_path: Path = field(default_factory=lambda: Path(DEFAULT_IDENTITY_INTERVIEW_STATE_PATH).expanduser().resolve())
+    user_memory_root: Optional[Path] = None
+    workspace_root: Path = field(default_factory=lambda: Path(DEFAULT_WORKSPACE_ROOT).expanduser().resolve())
+    event_log_path: Path = field(default_factory=lambda: Path(DEFAULT_EVENT_LOG_PATH).expanduser().resolve())
+
+    @property
+    def redacted_bot_label(self) -> str:
+        username = " @{}".format(self.bot_username) if self.bot_username else ""
+        return "{}{} ({})".format(self.id, username, self.bot_token_env)
+
+
+@dataclass(frozen=True)
 class HarnessConfig:
     """Runtime configuration for Telegram intake, workspaces, and Codex."""
 
@@ -152,6 +191,52 @@ class HarnessConfig:
     repo_clone_command: Optional[CommandSpec] = None
     repo_bootstrap_command: Optional[CommandSpec] = None
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
+    telegram_runtime_id: Optional[str] = None
+    telegram_bot_username: Optional[str] = None
+    telegram_command_prefixes: Tuple[str, ...] = ()
+    telegram_shared_chat_ids: Tuple[int, ...] = ()
+    telegram_known_bot_usernames: Tuple[str, ...] = ()
+    telegram_known_command_prefixes: Tuple[str, ...] = ()
+    telegram_users: Tuple[TelegramUserConfig, ...] = ()
+
+    def config_for_telegram_user(self, user: Union[TelegramUserConfig, str]) -> "HarnessConfig":
+        """Return a single-bot runtime config for one configured Telegram user."""
+
+        selected = self.telegram_user(user) if isinstance(user, str) else user
+        return dataclass_replace(
+            self,
+            telegram_bot_token=selected.bot_token,
+            allowed_chat_ids=selected.allowed_chat_ids,
+            allowed_user_ids=selected.allowed_user_ids,
+            telegram_api_base_url=selected.telegram_api_base_url,
+            telegram_poll_timeout_seconds=selected.telegram_poll_timeout_seconds,
+            telegram_request_timeout_seconds=selected.telegram_request_timeout_seconds,
+            telegram_state_path=selected.telegram_state_path,
+            assistant_identity=selected.assistant_identity,
+            assistant_identity_path=selected.assistant_identity_path,
+            assistant_identity_interview_state_path=selected.assistant_identity_interview_state_path,
+            owner_profile=selected.owner_profile,
+            run_state_path=selected.run_state_path,
+            chat_session_state_path=selected.chat_session_state_path,
+            identity_profile_path=selected.identity_profile_path,
+            identity_interview_state_path=selected.identity_interview_state_path,
+            user_memory_root=selected.user_memory_root,
+            workspace_root=selected.workspace_root,
+            event_log_path=selected.event_log_path,
+            telegram_runtime_id=selected.id,
+            telegram_bot_username=selected.bot_username,
+            telegram_command_prefixes=selected.command_prefixes,
+            telegram_shared_chat_ids=selected.shared_chat_ids,
+            telegram_known_bot_usernames=selected.known_bot_usernames,
+            telegram_known_command_prefixes=selected.known_command_prefixes,
+            telegram_users=(),
+        )
+
+    def telegram_user(self, user_id: str) -> TelegramUserConfig:
+        for user in self.telegram_users:
+            if user.id == user_id:
+                return user
+        raise ConfigError("unknown telegram user id: {}".format(user_id))
 
     @classmethod
     def load(
@@ -335,13 +420,6 @@ class HarnessConfig:
             "VERA_PROJECT_BUDGET_USD",
         )
 
-        if require_secrets and not telegram_bot_token:
-            raise ConfigError("VERA_TELEGRAM_BOT_TOKEN is required for live runs")
-        if require_secrets and not allowed_chat_ids and not allowed_user_ids:
-            raise ConfigError(
-                "telegram.allowed_chat_ids or telegram.allowed_user_ids is required for live runs"
-            )
-
         workspace_root = Path(
             source.get("VERA_WORKSPACE_ROOT", DEFAULT_WORKSPACE_ROOT)
         ).expanduser().resolve()
@@ -399,6 +477,44 @@ class HarnessConfig:
                 "VERA_CODEX_APPROVAL_DECISION must be one of: accept, acceptForSession, cancel, decline"
             )
 
+        telegram_users = _parse_telegram_user_configs(
+            telegram_source,
+            source,
+            telegram_api_base_url=telegram_api_base_url,
+            telegram_poll_timeout_seconds=telegram_poll_timeout_seconds,
+            telegram_request_timeout_seconds=telegram_request_timeout_seconds,
+        )
+
+        if require_secrets and telegram_users:
+            missing_tokens = [
+                "{} ({})".format(user.id, user.bot_token_env)
+                for user in telegram_users
+                if not user.bot_token
+            ]
+            if missing_tokens:
+                raise ConfigError(
+                    "Telegram bot token environment variables are required for configured users: {}".format(
+                        ", ".join(missing_tokens)
+                    )
+                )
+            missing_allow_lists = [
+                user.id
+                for user in telegram_users
+                if not user.allowed_chat_ids and not user.allowed_user_ids
+            ]
+            if missing_allow_lists:
+                raise ConfigError(
+                    "telegram.users entries must configure allowed_chat_ids or allowed_user_ids: {}".format(
+                        ", ".join(missing_allow_lists)
+                    )
+                )
+        elif require_secrets and not telegram_bot_token:
+            raise ConfigError("VERA_TELEGRAM_BOT_TOKEN is required for live runs")
+        elif require_secrets and not allowed_chat_ids and not allowed_user_ids:
+            raise ConfigError(
+                "telegram.allowed_chat_ids or telegram.allowed_user_ids is required for live runs"
+            )
+
         return cls(
             telegram_bot_token=telegram_bot_token,
             allowed_chat_ids=allowed_chat_ids,
@@ -441,7 +557,300 @@ class HarnessConfig:
                 "VERA_REPO_BOOTSTRAP_COMMAND",
             ),
             heartbeat=heartbeat,
+            telegram_shared_chat_ids=_parse_int_list(
+                telegram_source.get("shared_chat_ids"),
+                "telegram.shared_chat_ids",
+            ),
+            telegram_known_bot_usernames=tuple(
+                user.bot_username for user in telegram_users if user.bot_username is not None
+            ),
+            telegram_known_command_prefixes=tuple(
+                prefix for user in telegram_users for prefix in user.command_prefixes
+            ),
+            telegram_users=telegram_users,
         )
+
+
+def _parse_telegram_user_configs(
+    telegram_source: Mapping[str, Any],
+    env: Mapping[str, str],
+    telegram_api_base_url: str,
+    telegram_poll_timeout_seconds: int,
+    telegram_request_timeout_seconds: int,
+) -> Tuple[TelegramUserConfig, ...]:
+    raw_users = telegram_source.get("users")
+    if raw_users is None:
+        return ()
+    if not isinstance(raw_users, list):
+        raise ConfigError("telegram.users must be an array")
+
+    global_shared_chat_ids = _parse_int_list(
+        telegram_source.get("shared_chat_ids"),
+        "telegram.shared_chat_ids",
+    )
+    users = []
+    seen_ids = set()
+    seen_token_envs = set()
+    seen_usernames = set()
+    seen_prefixes = set()
+    for index, raw_user in enumerate(raw_users):
+        field_prefix = "telegram.users[{}]".format(index)
+        if not isinstance(raw_user, Mapping):
+            raise ConfigError("{} must be a JSON object".format(field_prefix))
+        _validate_telegram_user_keys(raw_user, field_prefix)
+
+        raw_id = raw_user.get("id")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            raise ConfigError("{}.id must be a non-empty string".format(field_prefix))
+        user_id = _safe_runtime_id(raw_id.strip(), "{}.id".format(field_prefix))
+        if user_id in seen_ids:
+            raise ConfigError("telegram.users contains duplicate id: {}".format(user_id))
+        seen_ids.add(user_id)
+
+        bot_token_env = _parse_bot_token_env(raw_user.get("bot_token_env"), field_prefix)
+        if bot_token_env in seen_token_envs:
+            raise ConfigError(
+                "telegram.users contains duplicate bot_token_env: {}".format(bot_token_env)
+            )
+        seen_token_envs.add(bot_token_env)
+        bot_username = _parse_bot_username(raw_user.get("bot_username"), field_prefix)
+        if bot_username is not None:
+            username_key = bot_username.lower()
+            if username_key in seen_usernames:
+                raise ConfigError(
+                    "telegram.users contains duplicate bot_username: {}".format(bot_username)
+                )
+            seen_usernames.add(username_key)
+
+        command_prefixes = _parse_command_prefixes(
+            raw_user.get("command_prefixes"),
+            "{}.command_prefixes".format(field_prefix),
+        )
+        for prefix in command_prefixes:
+            if prefix in seen_prefixes:
+                raise ConfigError(
+                    "telegram.users contains duplicate command_prefix: {}".format(prefix)
+                )
+            seen_prefixes.add(prefix)
+
+        shared_chat_ids = _parse_int_list(
+            raw_user.get("shared_chat_ids", global_shared_chat_ids),
+            "{}.shared_chat_ids".format(field_prefix),
+        )
+        if shared_chat_ids and bot_username is None and not command_prefixes:
+            raise ConfigError(
+                "{} must configure bot_username or command_prefixes for shared chats".format(
+                    field_prefix
+                )
+            )
+
+        assistant_source = _optional_mapping(
+            raw_user.get("assistant"),
+            "{}.assistant".format(field_prefix),
+        )
+        owner_source = _optional_mapping(raw_user.get("owner"), "{}.owner".format(field_prefix))
+        base_path = Path(DEFAULT_RUNTIME_DIR, "telegram_users", user_id)
+        assistant_identity_path = _parse_path(
+            _setting_value(
+                assistant_source or {},
+                "identity_path",
+                raw_user.get(
+                    "assistant_identity_path",
+                    str(base_path / "assistant_identity.json"),
+                ),
+            ),
+            "{}.assistant.identity_path".format(field_prefix),
+        )
+        assistant_identity_interview_state_path = _parse_path(
+            raw_user.get(
+                "assistant_identity_interview_state_path",
+                str(base_path / "assistant_identity_interviews.json"),
+            ),
+            "{}.assistant_identity_interview_state_path".format(field_prefix),
+        )
+        owner_profile = _parse_owner_profile(owner_source)
+        user_memory_root = _parse_optional_path(
+            _setting_value(
+                raw_user,
+                "user_memory_root",
+                (owner_source or {}).get("user_memory_root"),
+            ),
+            "{}.user_memory_root".format(field_prefix),
+        )
+
+        user = TelegramUserConfig(
+            id=user_id,
+            bot_token_env=bot_token_env,
+            bot_token=_optional_text(env.get(bot_token_env)),
+            bot_username=bot_username,
+            allowed_chat_ids=_parse_int_list(
+                raw_user.get("allowed_chat_ids"),
+                "{}.allowed_chat_ids".format(field_prefix),
+            ),
+            allowed_user_ids=_parse_int_list(
+                raw_user.get("allowed_user_ids"),
+                "{}.allowed_user_ids".format(field_prefix),
+            ),
+            shared_chat_ids=shared_chat_ids,
+            command_prefixes=command_prefixes,
+            telegram_api_base_url=_parse_url_base(
+                raw_user.get("api_base_url", telegram_api_base_url),
+                "{}.api_base_url".format(field_prefix),
+            ),
+            telegram_poll_timeout_seconds=_parse_positive_int(
+                raw_user.get("poll_timeout_seconds"),
+                "{}.poll_timeout_seconds".format(field_prefix),
+                telegram_poll_timeout_seconds,
+            ),
+            telegram_request_timeout_seconds=_parse_positive_int(
+                raw_user.get("request_timeout_seconds"),
+                "{}.request_timeout_seconds".format(field_prefix),
+                telegram_request_timeout_seconds,
+            ),
+            telegram_state_path=_parse_path(
+                raw_user.get("state_path", str(base_path / "telegram_state.json")),
+                "{}.state_path".format(field_prefix),
+            ),
+            assistant_identity=_parse_assistant_identity(
+                assistant_source,
+                assistant_identity_path,
+            ),
+            assistant_identity_path=assistant_identity_path,
+            assistant_identity_interview_state_path=assistant_identity_interview_state_path,
+            owner_profile=owner_profile,
+            run_state_path=_parse_path(
+                raw_user.get("run_state_path", str(base_path / "run_state.json")),
+                "{}.run_state_path".format(field_prefix),
+            ),
+            chat_session_state_path=_parse_path(
+                raw_user.get("chat_session_state_path", str(base_path / "chat_sessions.json")),
+                "{}.chat_session_state_path".format(field_prefix),
+            ),
+            identity_profile_path=_parse_path(
+                raw_user.get("identity_profile_path", str(base_path / "identity_profile.json")),
+                "{}.identity_profile_path".format(field_prefix),
+            ),
+            identity_interview_state_path=_parse_path(
+                raw_user.get("identity_interview_state_path", str(base_path / "identity_interviews.json")),
+                "{}.identity_interview_state_path".format(field_prefix),
+            ),
+            user_memory_root=user_memory_root,
+            workspace_root=_parse_path(
+                raw_user.get("workspace_root", str(base_path / "workspaces")),
+                "{}.workspace_root".format(field_prefix),
+            ),
+            event_log_path=_parse_path(
+                raw_user.get("event_log_path", str(base_path / "events.jsonl")),
+                "{}.event_log_path".format(field_prefix),
+            ),
+        )
+        users.append(user)
+
+    known_usernames = tuple(user.bot_username for user in users if user.bot_username is not None)
+    known_prefixes = tuple(prefix for user in users for prefix in user.command_prefixes)
+    return tuple(
+        dataclass_replace(
+            user,
+            known_bot_usernames=known_usernames,
+            known_command_prefixes=known_prefixes,
+        )
+        for user in users
+    )
+
+
+def _validate_telegram_user_keys(raw_user: Mapping[str, Any], field_prefix: str) -> None:
+    forbidden = {
+        "bot_token",
+        "telegram_bot_token",
+        "token",
+        "VERA_TELEGRAM_BOT_TOKEN",
+    }
+    present_forbidden = sorted(forbidden.intersection(raw_user.keys()))
+    if present_forbidden:
+        raise ConfigError(
+            "{} must not contain secret fields: {}".format(
+                field_prefix,
+                ", ".join(present_forbidden),
+            )
+        )
+    allowed = {
+        "id",
+        "bot_username",
+        "bot_token_env",
+        "allowed_chat_ids",
+        "allowed_user_ids",
+        "shared_chat_ids",
+        "command_prefixes",
+        "api_base_url",
+        "poll_timeout_seconds",
+        "request_timeout_seconds",
+        "state_path",
+        "assistant",
+        "assistant_identity_path",
+        "assistant_identity_interview_state_path",
+        "owner",
+        "run_state_path",
+        "chat_session_state_path",
+        "identity_profile_path",
+        "identity_interview_state_path",
+        "user_memory_root",
+        "workspace_root",
+        "event_log_path",
+    }
+    unknown = sorted(set(raw_user.keys()) - allowed)
+    if unknown:
+        raise ConfigError(
+            "{} contains unknown fields: {}".format(field_prefix, ", ".join(unknown))
+        )
+
+
+def _optional_mapping(value: Any, field_name: str) -> Optional[Mapping[str, Any]]:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ConfigError("{} must be a JSON object".format(field_name))
+    return value
+
+
+def _parse_bot_token_env(value: Any, field_prefix: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError("{}.bot_token_env must be a non-empty string".format(field_prefix))
+    text = value.strip()
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", text):
+        raise ConfigError("{}.bot_token_env must be an environment variable name".format(field_prefix))
+    return text
+
+
+def _parse_bot_username(value: Any, field_prefix: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError("{}.bot_username must be a string".format(field_prefix))
+    text = value.strip().lstrip("@")
+    if not text:
+        return None
+    if not re.match(r"^[A-Za-z0-9_]{5,32}$", text):
+        raise ConfigError("{}.bot_username must be a Telegram username".format(field_prefix))
+    return text
+
+
+def _parse_command_prefixes(value: Any, field_name: str) -> Tuple[str, ...]:
+    prefixes = _parse_string_tuple(value, field_name)
+    parsed = []
+    for prefix in prefixes:
+        if any(character.isspace() for character in prefix):
+            raise ConfigError("{} entries must not contain whitespace".format(field_name))
+        if not prefix.startswith(("/", "!")):
+            raise ConfigError("{} entries must start with / or !".format(field_name))
+        parsed.append(prefix)
+    return tuple(parsed)
+
+
+def _safe_runtime_id(value: str, field_name: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
+    if not normalized or normalized in {".", ".."}:
+        raise ConfigError("{} must contain usable identifier characters".format(field_name))
+    return normalized[:80]
 
 
 def _optional_text(value: Optional[str]) -> Optional[str]:
@@ -579,6 +988,8 @@ def _telegram_config_from_local(local_config: Mapping[str, Any]) -> Mapping[str,
         "request_timeout_seconds",
         "state_path",
         "unauthorized_response",
+        "shared_chat_ids",
+        "users",
     }
     unknown = sorted(set(telegram_config.keys()) - allowed)
     if unknown:

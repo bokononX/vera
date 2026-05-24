@@ -39,6 +39,12 @@ runtime execution explicit:
 - **Telegram configuration:** keeps non-secret connectivity settings in a
   local JSON config file while leaving the bot token in an environment-backed
   secret path.
+- **Multi-user Telegram configuration:** can coordinate multiple
+  `telegram.users` entries in one monitor process. Each entry represents one
+  human/user bot runtime with a distinct token environment-variable reference,
+  allow-list, Telegram offset state, chat-session state, run state, assistant
+  identity path, owner profile path, memory root, workspace root, and event-log
+  path.
 - **Owner identity and profile:** optionally records one primary owner in the
   same non-secret local config, keyed by stable Telegram `user_id` with display
   labels, values, priorities, communication style, escalation boundaries, and
@@ -112,6 +118,21 @@ runtime execution explicit:
   command/path without dumping secret-bearing environment details.
 - Telegram bot tokens must not be written to committed config, local templates,
   logs, or config-check output.
+- Multi-user Telegram bot tokens must remain distinct environment-backed
+  references. Raw token values must not appear in user entries, and
+  config-check output may show only the environment variable names plus
+  redacted presence.
+- Shared Telegram conversation is supported for groups and supergroups. Vera
+  should not treat broadcast-channel posts as equivalent shared conversation
+  input because they do not provide the same human sender and reply-target
+  routing semantics.
+- Shared-chat messages must route to exactly one bot by explicit bot mention,
+  reply-to-bot, or configured command prefix. Unaddressed messages and
+  multi-bot ambiguous messages should be ignored rather than fanned out.
+- Multi-user runtime state should stay isolated by configured user/bot: update
+  offsets, chat sessions, run state, assistant identity, owner profile,
+  user-memory roots, workspaces, and event logs should use per-user paths unless
+  an operator deliberately chooses an aggregate observability surface.
 - Non-secret Telegram connectivity settings should prefer the local config file
   interface over environment variables; env compatibility is only a migration
   fallback when no config file is present.

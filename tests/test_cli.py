@@ -62,6 +62,60 @@ class CliConfigTests(unittest.TestCase):
         )
         self.assertNotIn("redacted-test-value", rendered)
 
+    def test_check_config_prints_multi_user_secret_refs_without_token_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "telegram.json")
+            config_path.write_text(
+                """
+{
+  "telegram": {
+    "shared_chat_ids": [-1000],
+    "users": [
+      {
+        "id": "alice",
+        "bot_username": "alice_bot",
+        "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_ALICE",
+        "allowed_user_ids": [201],
+        "command_prefixes": ["/alice"]
+      },
+      {
+        "id": "bob",
+        "bot_username": "bob_bot",
+        "bot_token_env": "VERA_TELEGRAM_BOT_TOKEN_BOB",
+        "allowed_user_ids": [202],
+        "command_prefixes": ["/bob"]
+      }
+    ]
+  }
+}
+""".strip(),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "VERA_TELEGRAM_BOT_TOKEN_ALICE": "alice-secret-value",
+                    "VERA_TELEGRAM_BOT_TOKEN_BOB": "bob-secret-value",
+                    "VERA_CODEX_APP_SERVER_COMMAND": "{} app-server".format(
+                        shlex.quote(sys.executable)
+                    ),
+                },
+                clear=True,
+            ):
+                with contextlib.redirect_stdout(output):
+                    status = cli.main(["--check-config", "--telegram-config", str(config_path)])
+
+        self.assertEqual(status, 0)
+        rendered = output.getvalue()
+        self.assertIn("telegram_bot_token: <multi-user secret refs>", rendered)
+        self.assertIn("bot_token_env: VERA_TELEGRAM_BOT_TOKEN_ALICE (<secret-present>)", rendered)
+        self.assertIn("bot_token_env: VERA_TELEGRAM_BOT_TOKEN_BOB (<secret-present>)", rendered)
+        self.assertIn("telegram_shared_chat_ids: -1000", rendered)
+        self.assertNotIn("alice-secret-value", rendered)
+        self.assertNotIn("bob-secret-value", rendered)
+
     def test_check_config_fails_when_codex_executable_is_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir, "telegram.json")

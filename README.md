@@ -94,6 +94,43 @@ loads `VERA_CHAT_SESSION_STATE_PATH` and asks the app-server to resume the last
 known thread; if resume is unavailable, it safely starts a new thread while
 preserving Telegram authorization and local session mapping state.
 
+## Multi-User Telegram Bots
+
+Vera can also run one monitor process for multiple configured Telegram bots.
+Each `telegram.users` entry represents one human/user runtime with its own
+secret-backed bot token reference, allow-list, Telegram offset state, chat
+session state, run state, assistant identity, owner identity/profile paths,
+memory root, workspace root, and event log path. The raw bot token stays in the
+environment variable named by `bot_token_env`; do not put token values in JSON
+config, docs, state files, snapshots, or logs.
+
+```sh
+cp config/telegram.multi-user.example.json runtime/telegram_config.json
+export VERA_TELEGRAM_BOT_TOKEN_ALICE="..."
+export VERA_TELEGRAM_BOT_TOKEN_BOB="..."
+export VERA_CODEX_APP_SERVER_COMMAND="$(command -v codex) app-server"
+
+PYTHONPATH=src python3 -m vera_harness --check-config
+PYTHONPATH=src python3 -m vera_harness --monitor
+```
+
+The supported shared-chat mode is a Telegram group or supergroup. Broadcast
+channel posts are not treated as supported shared conversation input because the
+Bot API channel-post shape does not provide the same human sender and
+reply-target semantics used for routing and authorization.
+
+Shared group/supergroup messages are accepted by exactly one bot only when they
+are explicitly routed to that bot by one of these rules:
+
+- mention the bot username, for example `@alice_vera_bot summarize this`;
+- reply to a message from that bot;
+- start with that bot's configured command prefix, for example `/alice summarize this`.
+
+Messages in shared chats that do not match a configured bot are ignored by all
+bots. Messages that mention multiple configured bots are also ignored rather
+than fanned out. Direct chats with each bot continue to use that bot/user
+runtime only.
+
 ## Proactive Heartbeat
 
 Vera can run an opt-in heartbeat monitor beside Telegram polling. The heartbeat

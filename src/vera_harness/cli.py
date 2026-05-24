@@ -23,6 +23,7 @@ from .orchestrator import (
     FakeCodexRuntime,
     VeraHarness,
     format_dry_run,
+    format_multi_telegram_chat_loop,
     format_poll_once,
     format_telegram_chat_loop,
     format_telegram_loop,
@@ -433,28 +434,62 @@ def _format_config_check(config: HarnessConfig) -> str:
     unauthorized = config.telegram_unauthorized_response
     if unauthorized is None:
         unauthorized = "<disabled>"
-    return "\n".join(
+    lines = ["Vera configuration OK"]
+    if config.telegram_users:
+        lines.append("telegram_bot_token: <multi-user secret refs>")
+        lines.append("telegram_shared_chat_ids: {}".format(_join_ints(config.telegram_shared_chat_ids)))
+        lines.append("telegram_users:")
+        for user in config.telegram_users:
+            lines.extend(
+                [
+                    "- id: {}".format(user.id),
+                    "  bot_username: {}".format(user.bot_username or "<not configured>"),
+                    "  bot_token_env: {} (<secret-present>)".format(user.bot_token_env),
+                    "  allowed_chat_ids: {}".format(_join_ints(user.allowed_chat_ids)),
+                    "  allowed_user_ids: {}".format(_join_ints(user.allowed_user_ids)),
+                    "  shared_chat_ids: {}".format(_join_ints(user.shared_chat_ids)),
+                    "  command_prefixes: {}".format(",".join(user.command_prefixes)),
+                    "  telegram_state_path: {}".format(user.telegram_state_path),
+                    "  chat_session_state_path: {}".format(user.chat_session_state_path),
+                    "  run_state_path: {}".format(user.run_state_path),
+                    "  assistant_identity_name: {}".format(
+                        user.assistant_identity.safe_display_name
+                    ),
+                    "  assistant_identity_path: {}".format(user.assistant_identity_path),
+                    "  owner_identity: {}".format(_format_owner_identity_for_profile(user.owner_profile)),
+                    "  user_memory_root: {}".format(user.user_memory_root or "<not configured>"),
+                    "  workspace_root: {}".format(user.workspace_root),
+                    "  event_log_path: {}".format(user.event_log_path),
+                ]
+            )
+    else:
+        lines.extend(
+            [
+                "telegram_bot_token: <secret-present>",
+                "allowed_chat_ids: {}".format(_join_ints(config.allowed_chat_ids)),
+                "allowed_user_ids: {}".format(_join_ints(config.allowed_user_ids)),
+                "telegram_api_base_url: {}".format(config.telegram_api_base_url),
+                "telegram_poll_timeout_seconds: {}".format(config.telegram_poll_timeout_seconds),
+                "telegram_request_timeout_seconds: {}".format(
+                    config.telegram_request_timeout_seconds
+                ),
+                "telegram_state_path: {}".format(config.telegram_state_path),
+                "telegram_unauthorized_response: {}".format(unauthorized),
+                "assistant_identity_name: {}".format(config.assistant_identity.safe_display_name),
+                "assistant_identity_path: {}".format(config.assistant_identity_path),
+                "assistant_identity_interview_state_path: {}".format(
+                    config.assistant_identity_interview_state_path
+                ),
+                "owner_identity: {}".format(_format_owner_identity(config)),
+                "owner_profile_source: {}".format(_format_owner_profile_source(config)),
+                "chat_session_state_path: {}".format(config.chat_session_state_path),
+                "identity_profile_path: {}".format(config.identity_profile_path),
+                "identity_interview_state_path: {}".format(config.identity_interview_state_path),
+                "user_memory_root: {}".format(config.user_memory_root or "<not configured>"),
+            ]
+        )
+    lines.extend(
         [
-            "Vera configuration OK",
-            "telegram_bot_token: <secret-present>",
-            "allowed_chat_ids: {}".format(",".join(str(item) for item in config.allowed_chat_ids)),
-            "allowed_user_ids: {}".format(",".join(str(item) for item in config.allowed_user_ids)),
-            "telegram_api_base_url: {}".format(config.telegram_api_base_url),
-            "telegram_poll_timeout_seconds: {}".format(config.telegram_poll_timeout_seconds),
-            "telegram_request_timeout_seconds: {}".format(config.telegram_request_timeout_seconds),
-            "telegram_state_path: {}".format(config.telegram_state_path),
-            "telegram_unauthorized_response: {}".format(unauthorized),
-            "assistant_identity_name: {}".format(config.assistant_identity.safe_display_name),
-            "assistant_identity_path: {}".format(config.assistant_identity_path),
-            "assistant_identity_interview_state_path: {}".format(
-                config.assistant_identity_interview_state_path
-            ),
-            "owner_identity: {}".format(_format_owner_identity(config)),
-            "owner_profile_source: {}".format(_format_owner_profile_source(config)),
-            "chat_session_state_path: {}".format(config.chat_session_state_path),
-            "identity_profile_path: {}".format(config.identity_profile_path),
-            "identity_interview_state_path: {}".format(config.identity_interview_state_path),
-            "user_memory_root: {}".format(config.user_memory_root or "<not configured>"),
             "imessage_contact_ingestion_enabled: {}".format(
                 "yes" if config.imessage_contact_ingestion_enabled else "no"
             ),
@@ -485,6 +520,11 @@ def _format_config_check(config: HarnessConfig) -> str:
             "codex_app_server_executable: {}".format(codex_command.resolved_executable),
         ]
     )
+    return "\n".join(lines)
+
+
+def _join_ints(values: Tuple[int, ...]) -> str:
+    return ",".join(str(item) for item in values)
 
 
 def _display_optional_config(value: object) -> str:
@@ -496,7 +536,13 @@ def _display_optional_config(value: object) -> str:
 def _format_owner_identity(config: HarnessConfig) -> str:
     if config.owner_profile is None:
         return "<not configured>"
-    return config.owner_profile.redacted_identity_label()
+    return _format_owner_identity_for_profile(config.owner_profile)
+
+
+def _format_owner_identity_for_profile(profile: Any) -> str:
+    if profile is None:
+        return "<not configured>"
+    return profile.redacted_identity_label()
 
 
 def _format_owner_profile_source(config: HarnessConfig) -> str:
@@ -534,9 +580,14 @@ def _run_monitor(
     cycles = 0
     try:
         while True:
-            result = harness.run_telegram_chat_poll_once()
-            _append_telegram_chat_events(event_log, result)
-            print(format_telegram_chat_loop(result, title=title))
+            if config.telegram_users:
+                result = harness.run_multi_user_telegram_chat_poll_once()
+                _append_multi_telegram_chat_events(event_log, result)
+                print(format_multi_telegram_chat_loop(result, title=title))
+            else:
+                result = harness.run_telegram_chat_poll_once()
+                _append_telegram_chat_events(event_log, result)
+                print(format_telegram_chat_loop(result, title=title))
             cycles += 1
             if max_poll_cycles is not None and cycles >= max_poll_cycles:
                 return 0
@@ -624,8 +675,12 @@ class _ConsoleMonitorSupervisor:
         assert self._harness is not None
         try:
             while not self._stop_event.is_set():
-                result = self._harness.run_telegram_chat_poll_once()
-                _append_telegram_chat_events(self._event_log, result)
+                if self._config.telegram_users:
+                    result = self._harness.run_multi_user_telegram_chat_poll_once()
+                    _append_multi_telegram_chat_events(self._event_log, result)
+                else:
+                    result = self._harness.run_telegram_chat_poll_once()
+                    _append_telegram_chat_events(self._event_log, result)
                 if self._stop_event.wait(self._poll_interval_seconds):
                     break
         except Exception as exc:  # noqa: BLE001 - surface background failures in the console.
@@ -706,9 +761,36 @@ class _HeartbeatMonitorSupervisor:
 
 def _console_monitor_startup_error(config: HarnessConfig) -> Optional[str]:
     failures = []
-    if not config.telegram_bot_token:
+    if config.telegram_users:
+        missing = [
+            "{} ({})".format(user.id, user.bot_token_env)
+            for user in config.telegram_users
+            if not user.bot_token
+        ]
+        if missing:
+            failures.append(
+                "Telegram bot token environment variables are required: {}".format(
+                    ", ".join(missing)
+                )
+            )
+        missing_allow_lists = [
+            user.id
+            for user in config.telegram_users
+            if not user.allowed_chat_ids and not user.allowed_user_ids
+        ]
+        if missing_allow_lists:
+            failures.append(
+                "telegram.users entries require allowed_chat_ids or allowed_user_ids: {}".format(
+                    ", ".join(missing_allow_lists)
+                )
+            )
+    elif not config.telegram_bot_token:
         failures.append("VERA_TELEGRAM_BOT_TOKEN is required for live console monitoring")
-    if not config.allowed_chat_ids and not config.allowed_user_ids:
+    if (
+        not config.telegram_users
+        and not config.allowed_chat_ids
+        and not config.allowed_user_ids
+    ):
         failures.append(
             "telegram.allowed_chat_ids or telegram.allowed_user_ids is required for live console monitoring"
         )
@@ -750,12 +832,19 @@ def _append_telegram_chat_events(event_log: Any, result: Any) -> None:
             task_id=delivery.session_id,
             run_id=delivery.session_id,
             details={
+                "bot_id": delivery.bot_id,
+                "bot_username": delivery.bot_username,
                 "chat_id": delivery.chat_id,
                 "message_id": delivery.message_id,
                 "update_id": delivery.update_id,
                 "status": delivery.status.value,
             },
         )
+
+
+def _append_multi_telegram_chat_events(event_log: Any, result: Any) -> None:
+    for user_result in result.user_results:
+        _append_telegram_chat_events(event_log, user_result.result)
 
 
 def _append_heartbeat_event(event_log: Any, result: Any) -> None:
@@ -799,6 +888,18 @@ def _append_console_monitor_error(
 
 def _console_monitor_details(config: HarnessConfig) -> Mapping[str, object]:
     return {
+        "telegram_users": [
+            {
+                "id": user.id,
+                "bot_username": user.bot_username,
+                "bot_token_env": user.bot_token_env,
+                "telegram_state_path": str(user.telegram_state_path),
+                "chat_session_state_path": str(user.chat_session_state_path),
+                "run_state_path": str(user.run_state_path),
+                "event_log_path": str(user.event_log_path),
+            }
+            for user in config.telegram_users
+        ],
         "run_state_path": str(config.run_state_path),
         "event_log_path": str(config.event_log_path),
         "telegram_state_path": str(config.telegram_state_path),

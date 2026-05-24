@@ -1,5 +1,9 @@
 # Change log
 
+- 2026-05-23: Updated the Vera harness concept with multi-user Telegram bot
+  configuration, distinct secret-backed token references, per-user state
+  isolation, and shared group/supergroup routing by explicit mention, reply, or
+  command prefix without fan-out.
 - 2026-05-22: Updated the Vera harness and Herald user memory concepts with
   disabled-by-default, read-only iMessage contact metadata ingest and the
   boundary that discovered handles remain owner-review open questions until
